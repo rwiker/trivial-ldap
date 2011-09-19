@@ -5,4 +5,4 @@
 (defsystem :trivial-ldap
   :version "0.92"
   :components ((:file "trivial-ldap"))
-  :depends-on (usocket cl+ssl))
+  :depends-on (usocket cl+ssl yacc))

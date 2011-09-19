@@ -33,7 +33,9 @@
    #:attr-list #:attr-value #:new-entry #:new-ldap #:ldif #:change-rdn
    #:response #:results-pending-p #:next-search-result
    ; convenience macros
-   #:dosearch #:ldif-search))
+   #:dosearch #:ldif-search
+   ; utilities
+   #:escape-string #:unescape-string))
 	   
 (in-package :trivial-ldap)
 
@@ -124,6 +126,46 @@
   (assert (consp octet-list))
   (let ((int 0))
     (dolist (value octet-list int) (setq int (+ (ash int 8) value)))))
+
+(defun unescape-string (string)
+  (if (not (some (lambda (c) (char= c #\\)) string))
+    string
+    (flet ((hex-digit-char-p (c)
+             (or (char<= #\0 c #\9)
+                 (char<= #\a c #\f)
+                 (char<= #\A c #\F))))
+      (let ((string-length (length string)))
+        (with-output-to-string (s)
+          (loop for i below string-length
+                do (let ((c (char string i)))
+                     (if (char= c #\\)
+                       (cond ((and (< i (- string-length 1))
+                                   (member (char string (1+ i)) '(#\( #\) #\* #\\) :test #'char=))
+                              ;; LDAP v2 style escapes
+                              (write-char (char string (1+ i)) s)
+                              (incf i 1))
+                             ((and (< i (- string-length 2))
+                                   (hex-digit-char-p (char string (+ i 1)))
+                                   (hex-digit-char-p (char string (+ i 2))))
+                              ;; LDAP v3 style escapes
+                              (write-char (code-char (parse-integer (subseq string (1+ i) (+ 3 i)) :radix 16)) s)
+                              (incf i 2))
+                             (t
+                              (error "invalid escape at position ~d in ~a" i string)))
+                       (write-char (char string i) s))))
+          s)))))
+
+(defun escape-string (string)
+  (flet ((must-escape (c)
+           (member c '(#\( #\) #\* #\\ #\null) :test #'char=)))
+    (if (not (some #'must-escape string))
+      string
+      (with-output-to-string (s)
+        (loop for c across string
+              do (if (must-escape c)
+                   (format s "\\~2,'0X" (char-code c))
+                   (write-char c s)))
+        s))))
 
 (defun string->char-code-list (string)
   "Convert a string into a list of bytes."
@@ -594,34 +636,128 @@ NUMBER should be either an integer or LDAP application name as symbol."
   (seq-sequence (nconc (seq-octet-string att) 
 		       (seq-set (mapcan #'seq-octet-string vals)))))
 
+(defun ldap-filter-lexer (string)
+  (declare (type string string))
+  (let ((start 0)
+        (end (length string))
+        (start-condition nil))
+    (declare (type fixnum start end))
+    (labels ((looking-at (str &key (test #'string=))
+	       (declare (type string str))
+               (let ((len-str (length str)))
+                 (and (<= len-str (- end start))
+                      (funcall test str string :start2 start :end2 (+ start len-str)))))
+             (accept (match terminal &key (test #'string=))
+	       (declare (type (or symbol string) match))
+               (let ((match-str (if (symbolp match)
+                                    (symbol-name match)
+                                  match)))
+                 (when (looking-at match-str :test test)
+                   (multiple-value-prog1
+                       (values terminal match)
+                     (incf start (length match-str))))))
+             (accept-while (matcher terminal)
+               (let ((matched
+                      (loop for i from start below end
+                            while (funcall matcher (char string i))
+                            finally return (prog1
+                                               (subseq string start i)
+                                             (setq start i)))))
+                 (when (not (zerop (length matched)))
+                   (values terminal matched)))))
+      (lambda ()
+        (block nil 
+          (macrolet ((try-match (pattern &body body)
+                       (let ((gterminal (gensym "TERMINAL"))
+                             (gvalue (gensym "VALUE")))
+                         `(multiple-value-bind (,gterminal ,gvalue) ,pattern
+                            (when ,gterminal
+                              ,@body
+                              (return (values ,gterminal ,gvalue)))))))
+            (when (= start end)
+              nil)
+            (when (eq start-condition 'value)
+              (setq start-condition nil)
+              (try-match (accept-while (lambda (c) (char/= c #\))) 'string)))
+            (try-match (accept "(" 'lpar))
+            (try-match (accept ")" 'rpar))
+            (try-match (accept "&" 'and))
+            (try-match (accept "|" 'or))
+            (try-match (accept "!" 'not))
+            (try-match (accept '>= 'filtertype) (setq start-condition 'value))
+            (try-match (accept '<= 'filtertype) (setq start-condition 'value))
+            (try-match (accept '~= 'filtertype) (setq start-condition 'value))
+            (try-match (accept '= 'filtertype) (setq start-condition 'value))
+            (try-match (accept-while #'alphanumericp 'attr))))))))
+
+(yacc:define-parser *ldap-filter-parser*
+  (:start-symbol filter)
+  (:terminals (lpar rpar semicolon colon and or not 
+                    filtertype attr string))
+  (:print-derives-epsilon nil)
+               
+  ;; productions
+  (filter
+   (lpar filtercomp rpar (lambda (dummy1 val dummy2) (declare (ignore dummy1 dummy2)) val))
+   item)
+
+  (filtercomp
+   (and filterlist (lambda (op list) (declare (ignore op)) (cons '& list)))
+   (or filterlist (lambda (op list) (declare (ignore op)) (cons '\| list)))
+   (not filter (lambda (op element) (declare (ignore op)) (list '! element)))
+   item)
+
+  (filterlist
+   (filter #'list)
+   (filter filterlist #'cons))
+
+  (item
+   (simple #'identity)
+   #+nil extensible)
+
+  (simple
+   (attr filtertype value 
+         (lambda (attr type value)
+           (if (eq type '=)
+               (cond ((string= value "*")
+                      (list '=* attr))
+                     ((position #\* value :test #'char=)
+                      (list 'substring attr value))
+                     (t                      
+                      (list type attr value)))
+             (list type attr value)))))
+
+  (extensible
+   ;; whatever
+   )
+  (value
+   string))
+
 (defun seq-filter (filter)
   (let* ((filter (etypecase filter
 		   (cons   filter)
 		   (symbol filter)
-		   (string (filter-string->sexp filter))))
-	 (op  (car filter))
-	 (sub (if (and (eq '= op)
-		       (> (count #\* (symbol-name (third filter))) 0)) t nil)))
+		   (string (yacc:parse-with-lexer (ldap-filter-lexer filter) *ldap-filter-parser*))))
+	 (op  (car filter)))
     (cond
-      ((eq '! op) (seq-constructed-choice (ldap-filter-comparison-char op)
-					  (seq-filter (cadr filter))))
-      ((or (eq '&  op) (eq '\| op))
-       (seq-constructed-choice (ldap-filter-comparison-char op)
-			       (mapcan #'seq-filter (cdr filter))))
-      ((or (and (eq '= op) (not sub))
-	   (eq '<= op) (eq '>= op) (eq '~= op))
-       (seq-constructed-choice (ldap-filter-comparison-char op) 
-			       (seq-attribute-value-assertion
-				(second filter) (third filter))))
-      ((eq '=* op) (seq-primitive-choice 
-		    (ldap-filter-comparison-char op) (second filter)))
-      ((and (eq '= op) sub)
-       (seq-constructed-choice (ldap-filter-comparison-char 'substring)
-			       (append (seq-octet-string (second filter))
-				       (seq-substrings (third filter)))))
-      (t (error 'ldap-filter-error 
-		:mesg "unable to determine operator." :filter filter)))))
-
+     ((eq '! op) (seq-constructed-choice (ldap-filter-comparison-char op)
+                                         (seq-filter (second filter))))
+     ((or (eq '&  op) (eq '\| op))
+      (seq-constructed-choice (ldap-filter-comparison-char op)
+                              (mapcan #'seq-filter (cdr filter))))
+     ((eq '=* op) (seq-primitive-choice 
+                   (ldap-filter-comparison-char op) (second filter)))
+     ((or (eq '= op)
+          (eq '<= op) (eq '>= op) (eq '~= op))
+      (seq-constructed-choice (ldap-filter-comparison-char op) 
+                              (seq-attribute-value-assertion
+                               (second filter) (third filter))))
+     ((eq 'substring op)
+      (seq-constructed-choice (ldap-filter-comparison-char 'substring)
+                              (append (seq-octet-string (second filter))
+                                      (seq-substrings (third filter)))))
+     (t (error 'ldap-filter-error 
+               :mesg "unable to determine operator." :filter filter)))))
 
 (defun seq-substrings (value)
   "Given a search value with *s in it, return a BER encoded list."
