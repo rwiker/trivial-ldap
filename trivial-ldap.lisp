@@ -491,7 +491,7 @@ NUMBER should be either an integer or LDAP application name as symbol."
 (define-constant +ber-tag-int+ 
     (car (ber-tag 'universal 'primitive #x02)))
 (define-constant +ber-tag-enum+ 
-    (car(ber-tag 'universal 'primitive #x0A)))
+    (car (ber-tag 'universal 'primitive #x0A)))
 (define-constant +ber-tag-str+ 
     (car (ber-tag 'universal 'primitive #x04)))
 (define-constant +ber-tag-seq+ 
