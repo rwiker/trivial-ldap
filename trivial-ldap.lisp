@@ -170,7 +170,7 @@
 (defun string->char-code-list (string)
   "Convert a string into a list of bytes."
    (let ((string (etypecase string 
- 		  (string string)
+ 		  (string (unescape-string string))
  		  (symbol (symbol-name string)))))
      #-(or allegro ccl sbcl)
      (map 'list #'char-code string)
@@ -495,7 +495,7 @@ NUMBER should be either an integer or LDAP application name as symbol."
 			      (and (char>= x #\a) (char<= x #\z))
 			      (char= x #\;)
 			      (char= x #\-))) string)))
-      (if (= 0 bad-char-count) (intern (string-upcase string)) :keyword))))
+      (if (= 0 bad-char-count) (intern (string-upcase string) :keyword) nil))))
 
 ;;;;
 ;;;; BER sequence creators.
