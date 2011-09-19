@@ -203,63 +203,6 @@
 				     :initial-contents char-code-list)
 			 :external-format :utf8))
 
-(defun filter-string->sexp (filter)
-  "Convert a filter-string into a sexp."
-  (unless (and (char= #\( (char filter 0))
- 	       (char= #\) (char filter (1- (length filter)))))
-    (setf filter (format nil "(~A)" filter)))
-  (unless (balanced-parentheses-p filter)
-    (error 'ldap-filter-error :mesg "unbalanced parentheses" :filter filter))
-  (let ((*package* (find-package :ldap)))
-    (read-from-string (rearrange-filter (quote-verticals filter)) nil nil)))
-
-(defun quote-verticals (string)
-  "Backslash quote the character | (for filter strings)"
-  (with-output-to-string (stream)
-			 (loop for char across string do
-			       (when (char= char #\|) (write-char #\\ stream))
-			       (write-char char stream))))
-
-(defun balanced-parentheses-p (string)
-  (let ((level 0))
-    (dotimes (i (length string) (zerop level))
-      (case (char string i)
-	(#\( (incf level))
-	(#\) (if (zerop level) (return nil) (decf level)))))))
-  
-(defun rearrange-filter (string &optional (beg 0))
-  "Prepare a filter to be (read)."
-  (let ((pos (position #\= string :start beg)))
-    (if pos
-	(flet ((trim (x) (string-trim '(#\Space) x)))
-	  (let* ((opening-paren (position #\( string :from-end t :end pos))
-		 (closing-paren (position #\) string :start pos))
-		 (prev (char string (1- pos)))
-		 (next (char string (1+ pos)))
-		 (op-bounds 
-		  (cond
-		    ((or (eql #\~ prev) (eql #\< prev) (eql #\> prev)) 
-		     (list (1- pos) (1+ pos)))
-		    ((eql #\* next) (list pos (+ 2 pos)))
-		    (t (list pos (1+ pos)))))
-		 (op  (subseq string (first op-bounds) (second op-bounds)))
-		 (att (trim (subseq string (1+ opening-paren) 
-				    (first op-bounds))))
-		 (val (trim (subseq string (second op-bounds) closing-paren)))
-		 (pre-part (subseq string 0 (1+ opening-paren)))
-		 (post-part (subseq string closing-paren)))
-	    (unless (attribute-p att)
-	      (error 'ldap-filter-error
-		     :mesg (format nil "invalid attribute in filter: '~A'" att)
-		     :filter string))
-	    (when (and (string= op "=*") (not (string= val "")))
-	      (setf op "=" val (format nil "*~A" val)))
-	    (let ((this-part (format nil "~A ~A |~A|" op att val)))
-	      (rearrange-filter 
-	       (format nil "~A~A~A" pre-part this-part post-part)
-	       (+ (length pre-part) (length this-part))))))
-	string)))
-
 (defun split-substring (string &optional list)
   "Split a substring filter value into a list, retaining the * separators."
   (let ((pos (position #\* string)))
@@ -481,21 +424,6 @@ NUMBER should be either an integer or LDAP application name as symbol."
 (defun ldap-substring (type)
   "Given a substring type, return its integer choice value."
   (cdr (assoc type +ldap-substring+)))
-
-(defun attribute-p (attribute)
-  "Return T if string/symb is legal as an attribute, nil otherwise."
-  (let ((string (etypecase attribute 
-		  (string attribute)
-		  (symbol (symbol-name attribute)))))
-    (let ((bad-char-count 
-	   (count-if-not #'(lambda (x) 
-			     (or
-			      (and (char>= x #\0) (char<= x #\9))
-			      (and (char>= x #\A) (char<= x #\Z))
-			      (and (char>= x #\a) (char<= x #\z))
-			      (char= x #\;)
-			      (char= x #\-))) string)))
-      (if (= 0 bad-char-count) (intern (string-upcase string) :keyword) nil))))
 
 ;;;;
 ;;;; BER sequence creators.
