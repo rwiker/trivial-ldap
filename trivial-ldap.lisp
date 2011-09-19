@@ -480,6 +480,8 @@ NUMBER should be either an integer or LDAP application name as symbol."
   (ber-tag 'application 'constructed 'modifyrequest))
 
 ;;;; readers.
+(define-constant +ber-tag-referral+
+    (car (ber-tag 'context 'constructed 'searchrequest)))
 (define-constant +ber-tag-extendedresponse+
     (car (ber-tag 'application 'constructed 'extendedresponse)))
 (define-constant +ber-tag-ext-name+  
@@ -1223,7 +1225,8 @@ LIST-OF-MODS is a list of (type att val) triples."
 	       (setf message (subseq message bytes))))
 	    ((or (= tag-byte +ber-tag-set+)                   ; constructed.
 		 (= tag-byte +ber-tag-seq+)
-		 (= tag-byte +ber-tag-extendedresponse+))
+		 (= tag-byte +ber-tag-extendedresponse+)
+		 (= tag-byte +ber-tag-referral+))
 	     (multiple-value-bind (length bytes) 
 		 (read-length (subseq message 1))
 	       (let* ((start-of-data (+ 1 bytes)) ; tag + bytes
