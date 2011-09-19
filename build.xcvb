@@ -1,0 +1,6 @@
+#+xcvb
+(module
+ (:fullname "trivial-ldap"
+  :depends-on ("trivial-ldap")
+  :build-depends-on ("cl+ssl" "usocket")
+  :supersedes-asdf ("trivial-ldap")))
