@@ -453,7 +453,7 @@ NUMBER should be either an integer or LDAP application name as symbol."
 			      (and (char>= x #\a) (char<= x #\z))
 			      (char= x #\;)
 			      (char= x #\-))) string)))
-      (if (= 0 bad-char-count) (intern (string-upcase string)) nil))))
+      (if (= 0 bad-char-count) (intern (string-upcase string)) :keyword))))
 
 ;;;;
 ;;;; BER sequence creators.
@@ -677,7 +677,7 @@ NUMBER should be either an integer or LDAP application name as symbol."
 	 (rdn (subseq dn 0 (position #\, dn)))
 	 (rdn-att (subseq rdn 0 eql-pos))
 	 (rdn-val (subseq rdn (1+ eql-pos) (length rdn))))
-    (values rdn (list (intern (string-upcase rdn-att)) rdn-val))))
+    (values rdn (list (intern (string-upcase rdn-att) :keyword) rdn-val))))
 
 (defun new-entry (dn &key (attrs ()) (infer-rdn t))
   "Instantiate a new entry object."
@@ -752,7 +752,7 @@ return list of lists of attributes."
 (defun new-entry-from-list (list)
   "Create an entry object from the list return by search."
   (let ((dn (car list))
-	(attrs (mapcar #'(lambda (x) (cons (intern (string-upcase (car x)))
+	(attrs (mapcar #'(lambda (x) (cons (intern (string-upcase (car x)) :keyword)
 					   (cadr x)))
 		       (cadr list))))
     (new-entry dn :attrs attrs)))
