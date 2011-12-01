@@ -35,7 +35,7 @@
    ; convenience macros
    #:dosearch #:ldif-search
    ; utilities
-   #:escape-string #:unescape-string))
+   #:escape-string #:unescape-string #:reinterpret-string-as-utf8))
 	   
 (in-package :trivial-ldap)
 
@@ -167,12 +167,13 @@
                    (write-char c s)))
         s))))
 
+#||
 (defun string->char-code-list (string)
   "Convert a string into a list of bytes."
    (let ((string (etypecase string 
  		  (string (unescape-string string))
  		  (symbol (symbol-name string)))))
-     #-(or allegro ccl sbcl)
+     #-(or allegro ccl sbcl lispworks)
      (map 'list #'char-code string)
      #+ccl
      (coerce 
@@ -180,12 +181,14 @@
      #+sbcl
      (coerce (sb-ext:string-to-octets string :external-format :utf-8) 'list)
      #+allegro
-     (coerce (excl:string-to-octets string :null-terminate nil) 'list)))
+     (coerce (excl:string-to-octets string :null-terminate nil) 'list)
+     #+lispworks
+     (coerce (external-format:encode-lisp-string string :utf-8) 'list)))
 
 (defun char-code-list->string (char-code-list)
   "Convert a list of bytes into a string."
   (assert (or (null char-code-list) (consp char-code-list)))
-  #-(or allegro ccl sbcl)
+  #-(or allegro ccl sbcl lispworks)
   (map 'string #'code-char char-code-list)
   #+ccl
   (ccl::decode-string-from-octets (make-array (list (length char-code-list))
@@ -201,7 +204,67 @@
   (excl:octets-to-string (make-array (list (length char-code-list))
 				     :element-type '(unsigned-byte 8)
 				     :initial-contents char-code-list)
-			 :external-format :utf8))
+			 :external-format :utf8)
+
+  #+lispworks
+  (external-format:decode-external-string (make-array (list (length char-code-list))
+                                                      :element-type '(unsigned-byte 8)
+                                                      :initial-contents char-code-list)
+                                          :utf-8))
+||#
+
+(defun string->char-code-list (string)
+  "Convert a string into a list of bytes."
+   (let ((string (etypecase string 
+ 		  (string (unescape-string string))
+ 		  (symbol (symbol-name string)))))
+     (map 'list #'char-code string)))
+
+(defun char-code-list->string (char-code-list)
+  "Convert a list of bytes into a string."
+  (assert (or (null char-code-list) (consp char-code-list)))
+  (map 'string #'code-char char-code-list))
+
+(defun reinterpret-string-as-utf8 (string)
+  "Useful when a string has been generated from an external source,
+where the source data has been interpreted as an 8-bit (direct)
+encoding - e.g, :latin-1, but should have been interpreted as :utf-8."
+  (declare (optimize (speed 3) (compilation-speed 0)
+                     (debug 1) (safety 1)))
+  (let ((output-chars-remaining 0)
+        (output-accumulator 0))
+    (with-output-to-string (s nil :element-type 'character)
+      (flet ((output-byte (byte)
+               (if (zerop output-chars-remaining)
+                 (if (= (logand byte #x80) 0)
+                   (write-char (code-char byte) s)
+                   (cond ((= (logand byte #xe0) #xc0)
+                          (setf output-accumulator (logand byte #x1f))
+                          (setf output-chars-remaining 1))
+                         ((= (logand byte #xf0) #xe0)
+                          (setf output-accumulator (logand byte #x0f))
+                          (setf output-chars-remaining 2))
+                         ((= (logand byte #xf8) #xf0)
+                          (setf output-accumulator (logand byte #x07))
+                          (setf output-chars-remaining 3))
+                         ((= (logand byte #xfc) #xf8)
+                          (setf output-accumulator (logand byte #x03))
+                          (setf output-chars-remaining 4))
+                         ((= (logand byte #xe0) #xfe)
+                          (setf output-accumulator (logand byte #x01))
+                          (setf output-chars-remaining 5))
+                         (t (error "Invalid UTF-8 byte ~A" byte))))
+                 (progn
+                   (assert (= (logand byte #xc0) #x80))
+                   (setf output-accumulator (logior (ash output-accumulator 6)
+                                                    (logand byte #x3f)))
+                   (decf output-chars-remaining)
+                   (when (zerop output-chars-remaining)
+                     (write-char (code-char output-accumulator) s))))))
+        (loop for c across string
+              do (output-byte (char-code c))
+              finally (assert (= output-chars-remaining 0)))))))
+
 
 (defun split-substring (string &optional list)
   "Split a substring filter value into a list, retaining the * separators."
@@ -1322,6 +1385,14 @@ LIST-OF-MODS is a list of (type att val) triples."
   (multiple-value-bind (len bytes) (read-length message)
     (values (char-code-list->string 
 	     (subseq message bytes (+ len bytes))) (+ 1 bytes len))))
+
+(defun read-octets (message)
+  "Read an octet vector from the message, return vector and bytes consumed.."
+  (pop message) ; lose the tag.
+  (multiple-value-bind (len bytes) (read-length message)
+    (values (make-array (list len)
+                        :element-type '(unsigned-byte 8)
+                        :initial-contents (subseq message bytes (+ len bytes))) (+ 1 bytes len))))
 
 (defun read-length (message)
   "Given message starting with length marker, return length and bytes consumed"
