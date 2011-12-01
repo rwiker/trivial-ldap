@@ -35,9 +35,30 @@
    ; convenience macros
    #:dosearch #:ldif-search
    ; utilities
-   #:escape-string #:unescape-string #:reinterpret-string-as-utf8))
-	   
+   #:escape-string #:unescape-string
+   #:attribute-binary-p))
+
 (in-package :trivial-ldap)
+
+(defparameter *binary-attributes*
+  (list :objectsid :objectguid))
+
+(defun attribute-binary-p (attribute-name)
+  (let ((name-sym (intern (string-upcase (if (symbolp attribute-name)
+                                           (symbol-name attribute-name)
+                                           attribute-name))
+                          :keyword)))
+    (member name-sym *binary-attributes*)))
+
+(defun (setf attribute-binary-p) (value attribute-name)
+  (let ((name-sym (intern (string-upcase (if (symbolp attribute-name)
+                                           (symbol-name attribute-name)
+                                           attribute-name))
+                          :keyword)))
+    (declare (special *binary-attributes*))
+    (if value
+      (pushnew name-sym *binary-attributes*)
+      (setf *binary-attributes* (remove name-sym *binary-attributes*)))))
 
 ;;;;
 ;;;; error conditions
@@ -167,7 +188,6 @@
                    (write-char c s)))
         s))))
 
-#||
 (defun string->char-code-list (string)
   "Convert a string into a list of bytes."
    (let ((string (etypecase string 
@@ -211,59 +231,6 @@
                                                       :element-type '(unsigned-byte 8)
                                                       :initial-contents char-code-list)
                                           :utf-8))
-||#
-
-(defun string->char-code-list (string)
-  "Convert a string into a list of bytes."
-   (let ((string (etypecase string 
- 		  (string (unescape-string string))
- 		  (symbol (symbol-name string)))))
-     (map 'list #'char-code string)))
-
-(defun char-code-list->string (char-code-list)
-  "Convert a list of bytes into a string."
-  (assert (or (null char-code-list) (consp char-code-list)))
-  (map 'string #'code-char char-code-list))
-
-(defun reinterpret-string-as-utf8 (string)
-  "Useful when a string has been generated from an external source,
-where the source data has been interpreted as an 8-bit (direct)
-encoding - e.g, :latin-1, but should have been interpreted as :utf-8."
-  (declare (optimize (speed 3) (compilation-speed 0)
-                     (debug 1) (safety 1)))
-  (let ((output-chars-remaining 0)
-        (output-accumulator 0))
-    (with-output-to-string (s nil :element-type 'character)
-      (flet ((output-byte (byte)
-               (if (zerop output-chars-remaining)
-                 (if (= (logand byte #x80) 0)
-                   (write-char (code-char byte) s)
-                   (cond ((= (logand byte #xe0) #xc0)
-                          (setf output-accumulator (logand byte #x1f))
-                          (setf output-chars-remaining 1))
-                         ((= (logand byte #xf0) #xe0)
-                          (setf output-accumulator (logand byte #x0f))
-                          (setf output-chars-remaining 2))
-                         ((= (logand byte #xf8) #xf0)
-                          (setf output-accumulator (logand byte #x07))
-                          (setf output-chars-remaining 3))
-                         ((= (logand byte #xfc) #xf8)
-                          (setf output-accumulator (logand byte #x03))
-                          (setf output-chars-remaining 4))
-                         ((= (logand byte #xe0) #xfe)
-                          (setf output-accumulator (logand byte #x01))
-                          (setf output-chars-remaining 5))
-                         (t (error "Invalid UTF-8 byte ~A" byte))))
-                 (progn
-                   (assert (= (logand byte #xc0) #x80))
-                   (setf output-accumulator (logior (ash output-accumulator 6)
-                                                    (logand byte #x3f)))
-                   (decf output-chars-remaining)
-                   (when (zerop output-chars-remaining)
-                     (write-char (code-char output-accumulator) s))))))
-        (loop for c across string
-              do (output-byte (char-code c))
-              finally (assert (= output-chars-remaining 0)))))))
 
 
 (defun split-substring (string &optional list)
@@ -651,9 +618,9 @@ NUMBER should be either an integer or LDAP application name as symbol."
                (let ((matched
                       (loop for i from start below end
                             while (funcall matcher (char string i))
-                            finally return (prog1
+                            finally (return (prog1
                                                (subseq string start i)
-                                             (setq start i)))))
+                                             (setq start i))))))
                  (when (not (zerop (length matched)))
                    (values terminal matched)))))
       (lambda ()
@@ -878,12 +845,30 @@ return list of lists of attributes."
       (dolist (val (attr-value entry att))
 	(setf results (format nil "~@[~A~]~A: ~A~%" results att val))))))
 
+#||
 (defun new-entry-from-list (list)
   "Create an entry object from the list return by search."
   (let ((dn (car list))
 	(attrs (mapcar #'(lambda (x) (cons (intern (string-upcase (car x)) :keyword)
 					   (cadr x)))
 		       (cadr list))))
+    (new-entry dn :attrs attrs)))
+||#
+
+
+(defun new-entry-from-list (list)
+  "Create an entry object from the list return by search."
+  (let ((dn (char-code-list->string (car list)))
+	(attrs (mapcar #'(lambda (x)
+                           (let* ((key (intern (string-upcase (char-code-list->string (car x))) :keyword))
+                                  (value (if (attribute-binary-p key)
+                                           (cadr x)
+                                           (handler-case 
+                                               (mapcar #'char-code-list->string (cadr x))
+                                             (error (e)
+                                               (error "Probably a binary field: ~a~%" key))))))
+                             (cons key value)))
+                       (cadr list))))
     (new-entry dn :attrs attrs)))
 
 ;;;;
@@ -1341,7 +1326,7 @@ LIST-OF-MODS is a list of (type att val) triples."
 	       (fn (cond
 		     ((= tag-byte +ber-tag-int+)  #'read-integer)
 		     ((= tag-byte +ber-tag-enum+) #'read-integer)
-		     ((= tag-byte +ber-tag-str+)  #'read-string)
+		     ((= tag-byte +ber-tag-str+)  #'read-octets)
 		     ((= tag-byte +ber-tag-ext-name+) #'read-string)
 		     ((= tag-byte +ber-tag-ext-val+)  #'read-string)
 		     (t nil))))
@@ -1390,9 +1375,7 @@ LIST-OF-MODS is a list of (type att val) triples."
   "Read an octet vector from the message, return vector and bytes consumed.."
   (pop message) ; lose the tag.
   (multiple-value-bind (len bytes) (read-length message)
-    (values (make-array (list len)
-                        :element-type '(unsigned-byte 8)
-                        :initial-contents (subseq message bytes (+ len bytes))) (+ 1 bytes len))))
+    (values (subseq message bytes (+ len bytes)) (+ 1 bytes len))))
 
 (defun read-length (message)
   "Given message starting with length marker, return length and bytes consumed"
