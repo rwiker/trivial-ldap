@@ -47,7 +47,7 @@
   (let ((name-sym (intern (string-upcase (if (symbolp attribute-name)
                                            (symbol-name attribute-name)
                                            attribute-name))
-                          :keyword))) 
+                          :keyword)))
     (declare (special *binary-attributes*))
     (member name-sym *binary-attributes*)))
 
@@ -569,8 +569,10 @@ NUMBER should be either an integer or LDAP application name as symbol."
 		     
 (defun seq-primitive-string (string)
   "BER encode a string/symbol for use in a primitive context."
-  (assert (or (stringp string) (symbolp string)))
-  (string->char-code-list string))
+  (assert (or (stringp string) (symbolp string) (typep string 'list)))
+  (if (or (stringp string) (symbolp string))
+    (string->char-code-list string)
+    string))
 
 (defun seq-attribute-alist (atts)
   "BER encode an entry object's attribute alist (for use in add)."
@@ -697,7 +699,15 @@ NUMBER should be either an integer or LDAP application name as symbol."
 		   (cons   filter)
 		   (symbol filter)
 		   (string (yacc:parse-with-lexer (ldap-filter-lexer filter) *ldap-filter-parser*))))
-	 (op  (car filter)))
+	 (op (intern (symbol-name (car filter)) :trivial-ldap)))
+    (when (eq op 'or)
+      (setq op '\|))
+    (when (eq op 'and)
+      (setq op '&))
+    (when (eq op '!)
+      (setq op '!))
+    (when (eq op 'wildcard)
+      (setq op 'substring))
     (cond
      ((eq '! op) (seq-constructed-choice (ldap-filter-comparison-char op)
                                          (seq-filter (second filter))))
