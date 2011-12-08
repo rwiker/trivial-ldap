@@ -47,7 +47,8 @@
   (let ((name-sym (intern (string-upcase (if (symbolp attribute-name)
                                            (symbol-name attribute-name)
                                            attribute-name))
-                          :keyword)))
+                          :keyword))) 
+    (declare (special *binary-attributes*))
     (member name-sym *binary-attributes*)))
 
 (defun (setf attribute-binary-p) (value attribute-name)
@@ -860,7 +861,7 @@ return list of lists of attributes."
   "Create an entry object from the list return by search."
   (let ((dn (char-code-list->string (car list)))
 	(attrs (mapcar #'(lambda (x)
-                           (let* ((key (intern (string-upcase (char-code-list->string (car x))) :keyword))
+                           (let* ((key (char-code-list->string (car x)))
                                   (value (if (attribute-binary-p key)
                                            (cadr x)
                                            (handler-case 
