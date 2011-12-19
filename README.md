@@ -7,7 +7,7 @@ This is Kevin Montuori's *trivial-ldap*, with a few modifications.
 
 A few years back, I needed some mechanism for querying AD servers, as
 part of a custom content connector for the FAST ESP search engine. I
-found trivial-ldap, and was quickly using it to good effect.
+found trivial-ldap, and was soon using it to good effect.
 
 After having used trivial-ldap for a while, I made some modifications,
 and asked Kevin to review them, and integrate them if he felt that
@@ -38,7 +38,9 @@ should now be
 
     (ldap:attr-value *entry* :cname)
 
-and so on.
+and so on. Note: this is probably only important when working with an
+LDAP entry, as that is the only place where we use symbol identity for
+matching.
 
 Binary Attributes
 -----------------
@@ -75,7 +77,6 @@ strings. This has two advantages:
 
 ### Examples:
 
-    (ldap:search *ldap* '(and (= objectclass 'person') (= cname
-    "rayw")))
+    (ldap:search *ldap* '(and (= objectclass 'person') (= cname "rayw")))
 
 
