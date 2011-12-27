@@ -77,10 +77,7 @@ strings. This has two advantages:
 
 * Values can be specified as octet lists, strings or symbols --
   when a symbol is specified, the actual value used is whatever
-
-    `(symbol-name <symbol>)`
-
-  returns.
+  `(symbol-name <symbol>)` returns.
 
 ### Examples:
 
