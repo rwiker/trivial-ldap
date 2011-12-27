@@ -75,8 +75,13 @@ strings. This has two advantages:
   to have the filter parser deconstruct it back to the representation
   that should be natural for Lisp.
 
+* Values can be specified as octet lists, strings or symbols --
+  when a symbols is specified, the actual value used is whatever
+
+    (symbol-name /symbol/) evaluates to.
+
 ### Examples:
 
-    (ldap:search *ldap* '(and (= objectclass 'person') (= cname "rayw")))
+    (ldap:search *ldap* '(and (= objectclass person) (= cname "rayw")))
 
 
