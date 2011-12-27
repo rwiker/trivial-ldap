@@ -76,9 +76,11 @@ strings. This has two advantages:
   that should be natural for Lisp.
 
 * Values can be specified as octet lists, strings or symbols --
-  when a symbol is specified, the actual value used is
+  when a symbol is specified, the actual value used is whatever
 
-    (symbol-name <symbol>) 
+    `(symbol-name <symbol>)`
+
+  returns.
 
 ### Examples:
 
