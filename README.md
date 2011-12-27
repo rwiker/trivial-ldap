@@ -76,11 +76,9 @@ strings. This has two advantages:
   that should be natural for Lisp.
 
 * Values can be specified as octet lists, strings or symbols --
-  when a symbols is specified, the actual value used is whatever
+  when a symbol is specified, the actual value used is
 
     (symbol-name <symbol>) 
-
-  evaluates to.
 
 ### Examples:
 
