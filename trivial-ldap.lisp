@@ -878,7 +878,7 @@ return list of lists of attributes."
                                                (mapcar #'char-code-list->string (cadr x))
                                              (error (e)
                                                (error "Probably a binary field: ~a~%" key))))))
-                             (cons key value)))
+                             (cons (intern (string-upcase key) :keyword) value)))
                        (cadr list))))
     (new-entry dn :attrs attrs)))
 
