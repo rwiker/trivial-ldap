@@ -1,14 +1,12 @@
-;;;; TRIVIAL-LDAP v0.92 -- a one file, all lisp client implementation of
+;;;; TRIVIAL-LDAP -- a one file, all lisp client implementation of
 ;;;; parts of RFC 2261.  
 
 ;;;; Please see the trivial-ldap.html file for documentation and limitations.
 
-;;;; Updates are available at:
-;;;;    http://homepage.mac.com/ignavusinfo/trivial-ldap/
-
-;;;; TRIVIAL-LDAP is Copyright 2005-2009 Kevin Montuori and is 
-;;;; distributed under The Clarified Artistic License, a copy of which
-;;;; should have accompanied this file.
+;;;; TRIVIAL-LDAP is
+;;;; Copyright 2005-2009 Kevin Montuori
+;;;; and is distributed under The Clarified Artistic License, a copy
+;;;; of which should have accompanied this file.
 
 ;;;; Kevin Montuori <montuori@gmail.com>
 
