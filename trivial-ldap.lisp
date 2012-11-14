@@ -36,7 +36,11 @@
    #:dosearch #:ldif-search
    ; utilities
    #:escape-string #:unescape-string
-   #:attribute-binary-p))
+   #:attribute-binary-p
+   #:probably-binary-field-error
+   #:skip-entry
+   #:handle-as-binary
+   #:handle-as-binary-and-add-known))
 
 (in-package :trivial-ldap)
 
@@ -866,20 +870,43 @@ return list of lists of attributes."
     (new-entry dn :attrs attrs)))
 ||#
 
+(define-condition probably-binary-field-error (error)
+  ((key :initarg :key
+        :reader probably-binary-field-error-key
+        :documentation "The name of the key which has binary content"))
+  (:report (lambda (condition out)
+             (format out "Probably a binary field: ~a" (probably-binary-field-error-key condition))))
+  (:documentation "Condition that is signalled when a binary field is being parsed as a string"))
+
+(defun list-entries-to-string (key list)
+  (handler-case 
+      (mapcar #'char-code-list->string list)
+    (error ()
+      (error 'probably-binary-field-error :key key))))
+
+(defun attrs-from-list (x)
+  (restart-case 
+      (let* ((key (char-code-list->string (car x)))
+             (value (restart-case
+                        (if (attribute-binary-p key)
+                            (cadr x)
+                            (list-entries-to-string key (cadr x)))
+                      (handle-as-binary ()
+                        :report "Handle this attribute as binary"
+                        (cadr x))
+                      (handle-as-binary-and-add-known ()
+                        :report "Handle this attribute as binary and add it to the list of binary attributes"
+                        (setf (attribute-binary-p key) t)
+                        (cadr x)))))
+        (list (cons (intern (string-upcase key) :keyword) value)))
+    (skip-entry ()
+      :report "Ignore this attribute"
+      nil)))
 
 (defun new-entry-from-list (list)
   "Create an entry object from the list return by search."
   (let ((dn (char-code-list->string (car list)))
-	(attrs (mapcar #'(lambda (x)
-                           (let* ((key (char-code-list->string (car x)))
-                                  (value (if (attribute-binary-p key)
-                                           (cadr x)
-                                           (handler-case 
-                                               (mapcar #'char-code-list->string (cadr x))
-                                             (error (e)
-                                               (error "Probably a binary field: ~a~%" key))))))
-                             (cons (intern (string-upcase key) :keyword) value)))
-                       (cadr list))))
+	(attrs (mapcan #'attrs-from-list (cadr list))))
     (new-entry dn :attrs attrs)))
 
 ;;;;
