@@ -12,35 +12,9 @@
 
 #+xcvb (module ())
 
-(defpackage :trivial-ldap
-    (:use :cl-user :common-lisp :usocket)
-  (:nicknames :ldap)
-  (:shadow :delete :search)
-  (:export
-   ; mod types.
-   delete replace add 
-   ; search option symbols
-   base sub one never search find always
-   ; objects.
-   entry ldap
-   ; methods.
-   #:user #:pass #:base #:debugflag #:host #:port #:rdn #:dn #:attrs #:compare
-   #:sslflag #:reuse-connection #:rebind
-   #:bind #:unbind #:abandon #:add #:delete #:moddn #:search 
-   #:new-entry-from-list #:replace-attr #:del-attr #:add-attr #:modify
-   #:attr-list #:attr-value #:new-entry #:new-ldap #:ldif #:change-rdn
-   #:response #:results-pending-p #:next-search-result
-   ; convenience macros
-   #:dosearch #:ldif-search
-   ; utilities
-   #:escape-string #:unescape-string
-   #:attribute-binary-p
-   #:probably-binary-field-error
-   #:skip-entry
-   #:handle-as-binary
-   #:handle-as-binary-and-add-known))
-
 (in-package :trivial-ldap)
+
+(declare (optimize (speed 3) (safety 1) (debug 1) (compilation-speed 0)))
 
 (defparameter *binary-attributes*
   (list :objectsid :objectguid))
@@ -323,6 +297,9 @@ NUMBER should be either an integer or LDAP application name as symbol."
 
 (define-constant +ldap-disconnection-response+ "1.3.6.1.4.1.1466.20036"
   "OID of the unsolicited disconnection reponse.")
+
+(define-constant +ldap-control-extension-paging+ "1.2.840.113556.1.4.319"
+  "OID of the paging control.")
   
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (define-constant +ldap-application-names+
@@ -481,8 +458,12 @@ NUMBER should be either an integer or LDAP application name as symbol."
   (ber-tag 'application 'primitive 'unbindrequest))
 (define-constant +ber-modify-tag+
   (ber-tag 'application 'constructed 'modifyrequest))
+(define-constant +ber-controls-tag+
+    (car (ber-tag 'context 'constructed 0)))                 
 
 ;;;; readers.
+(define-constant +ber-tag-controls+
+    (car (ber-tag 'context 'constructed 0)))                 
 (define-constant +ber-tag-referral+
     (car (ber-tag 'context 'constructed 'searchrequest)))
 (define-constant +ber-tag-extendedresponse+
@@ -665,9 +646,9 @@ NUMBER should be either an integer or LDAP application name as symbol."
    item)
 
   (filtercomp
-   (and filterlist (lambda (op list) (declare (ignore op)) (cons '& list)))
-   (or filterlist (lambda (op list) (declare (ignore op)) (cons '\| list)))
-   (not filter (lambda (op element) (declare (ignore op)) (list '! element)))
+   (and filterlist (lambda (op list) (declare (ignore op)) (cons (intern "&") list)))
+   (or filterlist (lambda (op list) (declare (ignore op)) (cons (intern "|") list)))
+   (not filter (lambda (op element) (declare (ignore op)) (list (intern "!") element)))
    item)
 
   (filterlist
@@ -683,9 +664,9 @@ NUMBER should be either an integer or LDAP application name as symbol."
          (lambda (attr type value)
            (if (eq type '=)
                (cond ((string= value "*")
-                      (list '=* attr))
+                      (list (intern "=*") attr))
                      ((position #\* value :test #'char=)
-                      (list 'substring attr value))
+                      (list (intern "SUBSTRING") attr value))
                      (t                      
                       (list type attr value)))
              (list type attr value)))))
@@ -696,17 +677,24 @@ NUMBER should be either an integer or LDAP application name as symbol."
   (value
    string))
 
+(defun listify-filter (filter)
+  (let ((parsed-filter (yacc:parse-with-lexer (ldap-filter-lexer filter) *ldap-filter-parser*)))
+    parsed-filter))
+
 (defun seq-filter (filter)
   (let* ((filter (etypecase filter
 		   (cons   filter)
-		   (symbol filter)
-		   (string (yacc:parse-with-lexer (ldap-filter-lexer filter) *ldap-filter-parser*))))
-	 (op (intern (symbol-name (car filter)) :trivial-ldap)))
+		   #+nil ; FIXME: can't see that symbol can appear
+                         ; here... and if it does, we cannot take the
+                         ; #'car of it
+                   (symbol filter)
+		   (string (listify-filter filter))))
+         (op (intern (symbol-name (car filter)) :trivial-ldap)))
     (when (eq op 'or)
       (setq op '\|))
     (when (eq op 'and)
       (setq op '&))
-    (when (eq op '!)
+    (when (eq op 'not)
       (setq op '!))
     (when (eq op 'wildcard)
       (setq op 'substring))
@@ -966,7 +954,12 @@ return list of lists of attributes."
    (results-pending-p :initarg :results-pending-p
 		      :initform nil
 		      :type (boolean)
-		      :accessor results-pending-p)))
+		      :accessor results-pending-p)
+   (paging-cookie :initform ""
+                  :type string
+                  :accessor paging-cookie)
+   (search-fn :initform nil
+              :accessor search-fn)))
    
 
 (defun new-ldap (&key (host "localhost") (sslflag nil)
@@ -1087,6 +1080,20 @@ and throw an error if it's anything else."
 	     :mesg (format nil "Received unhandled extended response: ~A~%"
 			   content))))
 
+(defun process-response-controls (ldap controls)
+  (loop for (control-extension-oid/octets control-value) in controls
+        for control-extension-oid = (char-code-list->string control-extension-oid/octets)
+        do (cond ((string= control-extension-oid +ldap-control-extension-paging+)
+                  (destructuring-bind (remaining-estimate cookie)
+                      (first (read-generic control-value))
+                    (declare (ignore remaining-estimate))
+                    #+nil
+                    (format t "~&Control: ~a; remaining (estimate): ~d; length(cookie) = ~d~%"
+                            control-extension-oid remaining-estimate (length cookie))
+                    (setf (paging-cookie ldap) cookie)))
+                 (t
+                  (error "Unknown control extension: ~a" control-extension-oid)))))
+
 (defmethod parse-ldap-message ((ldap ldap) &optional (return-entry nil))
   "Parse an ldap object's response slot."
   (let ((received-content ()))
@@ -1101,7 +1108,13 @@ and throw an error if it's anything else."
 	     (t (setf received-content new-entry)))))
 	((eq appname 'searchresultreference))
 	((eq appname 'searchresultdone)
-	 (setf (results-pending-p ldap) nil)
+         (destructuring-bind (result-code matched-dn error-message . rest)
+             content
+           (declare (ignore result-code matched-dn error-message))
+           (when (and rest (consp rest) (consp (car rest)) (eq (car (car rest)) 'controls))
+             (let ((controls (second (first rest))))
+               (process-response-controls ldap controls))))
+         (setf (results-pending-p ldap) nil)
 	 (setf received-content nil))
 	((eq appname 'extendedresponse) 
 	 (handle-extended-response ldap content)
@@ -1234,28 +1247,41 @@ LIST-OF-MODS is a list of (type att val) triples."
 
 (defmethod search ((ldap ldap) filter &key base (scope 'sub) 
 		   (deref 'never) (size-limit 0) (time-limit 0) 
-		   types-only attributes)
+		   types-only attributes (paging-size nil))
   "Search the LDAP directory."
-  (let ((base (if (null base) (base ldap) base))
-	(scope (ldap-scope scope))
-	(deref (ldap-deref deref)))
-    (possibly-reopen-and-rebind ldap)
-    (send-message ldap (msg-search filter base scope deref size-limit 
-				   time-limit types-only attributes))
-    (receive-message ldap)
-    (parse-ldap-message ldap)))
+  (flet ((search-i (ldap filter base scope deref size-limit time-limit types-only attributes paging-cookie)
+           (possibly-reopen-and-rebind ldap)
+           (send-message ldap (msg-search filter base scope deref size-limit 
+                                          time-limit types-only attributes paging-size paging-cookie))
+           (receive-message ldap)
+           (parse-ldap-message ldap)))
+    (let ((base (if (null base) (base ldap) base))
+          (scope (ldap-scope scope))
+          (deref (ldap-deref deref)))
+      (setf (search-fn ldap)
+            (when (and paging-size (zerop size-limit))
+              (lambda (paging-cookie)
+                (search-i ldap filter base scope deref size-limit time-limit
+                          types-only attributes paging-cookie))))
+      (funcall #'search-i ldap filter base scope deref size-limit time-limit types-only attributes ""))))
 
 (defmethod next-search-result ((ldap ldap))
   "Return the next search result (as entry obj) or NIL if none."
-  (if (results-pending-p ldap)
-      (let ((pending-entry (entry-buffer ldap)))
-	(cond 
-	  ((not (null pending-entry))
-	   (setf (entry-buffer ldap) nil)
-	   pending-entry)
-	  (t (receive-message ldap)
-	     (parse-ldap-message ldap t))))
-      nil))
+  (flet ((next-search-result-i ()
+           (if (results-pending-p ldap)
+             (let ((pending-entry (entry-buffer ldap)))
+               (cond 
+                ((not (null pending-entry))
+                 (setf (entry-buffer ldap) nil)
+                 pending-entry)
+                (t (receive-message ldap)
+                   (parse-ldap-message ldap t))))
+             nil)))
+    (or (next-search-result-i)
+        (and (plusp (length (paging-cookie ldap)))
+             (search-fn ldap)
+             (funcall (search-fn ldap) (paging-cookie ldap))
+             (next-search-result-i)))))
 
 (defmacro dosearch ((var search-form) &body body)
   (let ((ldap (gensym))
@@ -1330,7 +1356,7 @@ LIST-OF-MODS is a list of (type att val) triples."
 		 mod-list)))
     (ber-msg +ber-modify-tag+ (append dn (seq-sequence mods)))))
 
-(defun msg-search (filter base scope deref size time types attrs)
+(defun msg-search (filter base scope deref size time types attrs &optional paging-size paging-cookie)
   "Return the sequence of bytes representing a search message."
   (let ((filter (seq-filter filter))
 	(base   (seq-octet-string base))
@@ -1339,9 +1365,21 @@ LIST-OF-MODS is a list of (type att val) triples."
 	(size   (seq-integer size))
 	(time   (seq-integer time))
 	(types  (seq-boolean types))
-	(attrs  (seq-attribute-list attrs)))
+	(attrs  (seq-attribute-list attrs))
+        (controls
+         (when (and paging-size
+                    (zerop size))
+           (seq-constructed-choice 0
+                                   (seq-sequence
+                                    (nconc
+                                     (seq-octet-string +ldap-control-extension-paging+)
+                                     (seq-boolean t)
+                                     (seq-octet-string (seq-sequence
+                                                        (nconc
+                                                         (seq-integer paging-size)
+                                                         (seq-octet-string paging-cookie))))))))))
     (ber-msg +ber-search-tag+ 
-	     (append base scope deref size time types filter attrs))))
+	     (append base scope deref size time types filter attrs controls))))
 
 ;;;;
 ;;;; sequence reader & decoder functions
@@ -1355,6 +1393,14 @@ LIST-OF-MODS is a list of (type att val) triples."
       (setf response (subseq response bytes)))
     (values (read-generic response) appname)))
 
+(defun read-controls (message)
+  (multiple-value-bind (length bytes) 
+      (read-length (subseq message 1))
+    (let* ((start-of-data (+ 1 bytes)) ; tag + bytes
+           (end-of-data   (+ start-of-data length))
+           (controls-seq (read-generic (subseq message start-of-data end-of-data))))
+      (values (list 'controls controls-seq) end-of-data))))
+
 (defun read-generic (message &optional (res ()))
   (if (and (consp message) (> (length message) 0))
       (progn
@@ -1365,6 +1411,7 @@ LIST-OF-MODS is a list of (type att val) triples."
 		     ((= tag-byte +ber-tag-str+)  #'read-octets)
 		     ((= tag-byte +ber-tag-ext-name+) #'read-string)
 		     ((= tag-byte +ber-tag-ext-val+)  #'read-string)
+                     ((= tag-byte +ber-tag-controls+) #'read-controls)
 		     (t nil))))
 	  (cond 
 	    ((functionp fn)                                   ; primitive.
