@@ -61,6 +61,12 @@ and
 
     (setf (ldap:attribute-binary-p <attribute-name>) <generalized-boolean>)
 
+Note: Elias Mårtenson has supplied some handy restarts that can be
+used when it turns out that an attribute cannot be converted to UTF-8
+(which, in turn, probably means that it should be treated as
+binary). See handle-as-binary and handle-as-binary-and-add-known in
+trivial-ldap.lisp .
+
 
 List Equivalents
 ----------------
@@ -88,7 +94,7 @@ strings. This has two advantages:
     (ldap:search *ldap* '(and (= objectclass person) (= cname "rayw")))
 
     (let ((name "rayw"))
-	(ldap:search *ldap* `(and (= objectclass person) (= cname ,name))))
+        (ldap:search *ldap* `(and (= objectclass person) (= cname ,name))))
 
 Paging Through Results
 ----------------------
