@@ -14,7 +14,7 @@
 
 (in-package :trivial-ldap)
 
-(declare (optimize (speed 3) (safety 1) (debug 1) (compilation-speed 0)))
+(declaim (optimize (speed 3) (safety 1) (debug 1) (compilation-speed 0)))
 
 (defparameter *binary-attributes*
   (list :objectsid :objectguid))
