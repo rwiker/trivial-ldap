@@ -79,6 +79,15 @@
 	       (format stream "~A~%DN: ~A~%Code: ~A~%Message: ~A~%"
 		       (mesg c) (dn c) (code c) (msg c)))))
 
+(define-condition ldap-bind-error (ldap-error)
+  ((code-sym :initarg :code-sym
+             :reader code-sym
+             :initform (error "Must specify code-sym")))
+  (:report (lambda (c stream)
+             (format stream "LDAP Bind Error: ~A~%"
+                     (code-sym c)))))
+             
+
 ;;;;
 ;;;; utility functions
 ;;;;
@@ -1020,7 +1029,11 @@ settings on their LDAP servers."
     (when (and (not absolutely-no-bind)
 	       (eq (reuse-connection ldap) 'rebind))
       (debug-mesg ldap "rebinding...")
-      (bind ldap))
+      (multiple-value-bind (rc code-sym msg)
+          (bind ldap)
+        (declare (ignore msg))
+        (unless rc
+          (error 'ldap-bind-error :code-sym code-sym))))
     stream))
   
 (defmethod send-message ((ldap ldap) message &optional (response-expected t))
