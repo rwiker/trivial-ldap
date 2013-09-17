@@ -44,8 +44,6 @@
 
 (in-package :trivial-ldap)
 
-(declaim (optimize (speed 0) (safety 3) (debug 3)))
-
 (defparameter *init-sec-fn* nil)
 (defparameter *wrap-fn* nil)
 (defparameter *unwrap-fn* nil)
