@@ -1241,7 +1241,7 @@ the directory server returned."
      with flags = nil
      do (multiple-value-bind (continue-reply context-result buffer flags-reply)
             (funcall *init-sec-fn*
-                     "ldap@sg-dc3.sg.murex.com"
+                     (format nil "ldap@~a" (host ldap))
                      :flags '(:mutual :replay)
                      :context context
                      :input-token reply-buffer)
