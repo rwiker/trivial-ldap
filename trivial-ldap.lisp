@@ -46,6 +46,10 @@
 
 (declaim (optimize (speed 0) (safety 3) (debug 3)))
 
+(defparameter *init-sec-fn* nil)
+(defparameter *wrap-fn* nil)
+(defparameter *unwrap-fn* nil)
+
 (defparameter *binary-attributes*
   (list :objectsid :objectguid))
 
@@ -993,9 +997,21 @@ indicates encryption. Other values means plain wrapping.")
 		 (user "") (pass "") (base nil) (debug nil) (gss nil)
 		 (reuse-connection nil))
   "Instantiate a new ldap object."
-  (make-instance 'ldap :host host :port port :user user :sslflag sslflag
-		 :pass pass :debugflag debug :base base 
-		 :reuse-connection reuse-connection :gss gss))
+  (labels ((find-symbol-in-package-or-error (name package)
+             (let ((s (find-symbol name package)))
+               (unless s
+                 (error "Could not find symbol ~a in ~a" name (package-name package)))
+               s)))
+    (when (and gss (null *init-sec-fn*))
+      (let ((package (find-package "CL-GSS")))
+        (unless package
+          (error "When using GSSAPI authentication, the CL-GSS package needs to be loaded."))
+        (setq *init-sec-fn* (find-symbol-in-package-or-error "INIT-SEC" package))
+        (setq *wrap-fn* (find-symbol-in-package-or-error "WRAP" package))
+        (setq *unwrap-fn* (find-symbol-in-package-or-error "UNWRAP" package))))
+    (make-instance 'ldap :host host :port port :user user :sslflag sslflag
+                   :pass pass :debugflag debug :base base 
+                   :reuse-connection reuse-connection :gss gss)))
 
 (defmethod debug-mesg ((ldap ldap)  message)
   "If debugging in T, print a message."
@@ -1051,8 +1067,9 @@ settings on their LDAP servers."
 
 (defun encrypt-message (ldap message stream)
   (let ((buffer (make-array (length message) :element-type '(unsigned-byte 8) :initial-contents message)))
-    (write-with-length (cl-gss:wrap (gss-context ldap) buffer
-                                    :conf (if (eq (wrap-packets ldap) :conf) t nil))
+    (write-with-length (funcall *wrap-fn*
+                                (gss-context ldap) buffer
+                                :conf (if (eq (wrap-packets ldap) :conf) t nil))
                        stream)))
 
 (defmethod send-message ((ldap ldap) message &optional (response-expected t))
@@ -1070,7 +1087,7 @@ settings on their LDAP servers."
 
 (defun decrypt-stream (ldap)
   (multiple-value-bind (buffer conf)
-      (cl-gss:unwrap (gss-context ldap) (read-with-length (ldapstream ldap)))
+      (funcall *unwrap-fn* (gss-context ldap) (read-with-length (ldapstream ldap)))
     (when (and (eq (wrap-packets ldap) :conf)
                (not conf))
       (error "Received unencrypted packets on a stream an encrypted connection. Aborting."))
@@ -1225,10 +1242,11 @@ the directory server returned."
      with reply-buffer = nil
      with flags = nil
      do (multiple-value-bind (continue-reply context-result buffer flags-reply)
-            (cl-gss:init-sec "ldap@sg-dc3.sg.murex.com"
-                             :flags '(:mutual :replay)
-                             :context context
-                             :input-token reply-buffer)
+            (funcall *init-sec-fn*
+                     "ldap@sg-dc3.sg.murex.com"
+                     :flags '(:mutual :replay)
+                     :context context
+                     :input-token reply-buffer)
           (setq need-reply continue-reply)
           (setq context context-result)
           (setq flags flags-reply)
