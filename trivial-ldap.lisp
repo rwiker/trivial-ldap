@@ -955,6 +955,10 @@ return list of lists of attributes."
            :accessor gss)
    (gss-context :initform nil
                 :accessor gss-context)
+   (incoming-buffer :initform nil
+                    :accessor incoming-buffer)
+   (incoming-buffer-pos :initform nil
+                        :accessor incoming-buffer-pos)
    (wrap-packets :initform nil
                  :accessor wrap-packets
                  :documentation "NIL means no wrapping. :CONF
@@ -1035,7 +1039,6 @@ If the attribute is nil, do nothing; if t, reopen; and, if bind, rebind.
 This function exists to help the poor saps (read: me) with very fast idletimeout
 settings on their LDAP servers."
   (debug-mesg ldap "reusing connection...")
-  (format t "reuse?~%")
   (let (stream)
     (when (reuse-connection ldap) 
       (close-stream ldap)
@@ -1065,15 +1068,35 @@ settings on their LDAP servers."
 			:host (host ldap) :port (port ldap) :mesg e)))
     (when response-expected (setf (results-pending-p ldap) t))))
 
-(defun receive-length (stream)
+(defun decrypt-stream (ldap)
+  (multiple-value-bind (buffer conf)
+      (cl-gss:unwrap (gss-context ldap) (read-with-length (ldapstream ldap)))
+    (when (and (eq (wrap-packets ldap) :conf)
+               (not conf))
+      (error "Received unencrypted packets on a stream an encrypted connection. Aborting."))
+    buffer))
+
+(defun read-wrapped-byte (ldap)
+  (if (wrap-packets ldap)
+      (progn
+        (when (or (null (incoming-buffer ldap))
+                  (>= (incoming-buffer-pos ldap) (length (incoming-buffer ldap))))
+          (setf (incoming-buffer ldap) (decrypt-stream ldap))
+          (setf (incoming-buffer-pos ldap) 0))
+        (let ((position (incoming-buffer-pos ldap)))
+          (incf (incoming-buffer-pos ldap))
+          (aref (incoming-buffer ldap) position)))
+      (read-byte (ldapstream ldap))))
+
+(defun receive-length (ldap)
   "Read length of LDAP message from stream, return length & the bytes read."
-  (let* ((length-byte (read-byte stream))
+  (let* ((length-byte (read-wrapped-byte ldap))
 	 (byte-seq ())
 	 (byte-len (- length-byte 128))
 	 (length-of-message
 	  (cond
 	    ((< length-byte 128) length-byte)
-	    (t (dotimes (i byte-len) (push (read-byte stream) byte-seq))
+	    (t (dotimes (i byte-len) (push (read-wrapped-byte ldap) byte-seq))
 	       (base256->base10 (reverse byte-seq)))))
 	 (all-bytes-consumed (append (list length-byte) (nreverse byte-seq))))
     (values length-of-message all-bytes-consumed)))
@@ -1101,40 +1124,26 @@ settings on their LDAP servers."
     (write-sequence buffer stream)
     (finish-output stream)))
 
-(defun decrypt-stream (ldap)
-  (multiple-value-bind (buffer conf)
-      (cl-gss:unwrap (gss-context ldap) (read-with-length (get-stream ldap)))
-    (when (and (eq (wrap-packets ldap) :conf)
-               (not conf))
-      (error "Received unencrypted packets on a stream an encrypted connection. Aborting."))
-    buffer))
-
-(defun %receive-message (ldap stream)
-  (let* (ber-response
-         (initial-byte (read-byte stream)))
-  (unless (or (null initial-byte) (valid-ldap-response-p initial-byte))
-    (error "Received unparsable data from LDAP server."))
-  (multiple-value-bind (message-length bytes-read) (receive-length stream)
-    (dotimes (i message-length) (push (read-byte stream) ber-response))
-    (setf (response ldap) (nreverse ber-response))
-    (debug-mesg ldap (format nil *hex-print* "From LDAP:"
-                             (append (list initial-byte) bytes-read 
-                                     (response ldap)))))
-  (let ((response-minus-message-number 
-         (check-message-number (response ldap) (mesg ldap))))
-    (cond
-      ((null response-minus-message-number) (%receive-message ldap stream))
-      (t (setf (response ldap) response-minus-message-number))))))
-
 (defmethod receive-message ((ldap ldap))
   "Read incoming LDAP data from the stream, populate LDAP response slot.
 The initial tag and length of message bytes will have been consumed already
 and will not appear in the response.  Note that this method is executed
 only for its side effects."
-  (if (wrap-packets ldap)
-      (flexi-streams:with-input-from-sequence (stream (decrypt-stream ldap))
-        (%receive-message ldap stream))
-      (%receive-message ldap (get-stream ldap))))
+  (let* (ber-response
+         (initial-byte (read-wrapped-byte ldap)))
+    (unless (or (null initial-byte) (valid-ldap-response-p initial-byte))
+      (error "Received unparsable data from LDAP server."))
+    (multiple-value-bind (message-length bytes-read) (receive-length ldap)
+      (dotimes (i message-length) (push (read-wrapped-byte ldap) ber-response))
+      (setf (response ldap) (nreverse ber-response))
+      (debug-mesg ldap (format nil *hex-print* "From LDAP:"
+                               (append (list initial-byte) bytes-read 
+                                       (response ldap)))))
+    (let ((response-minus-message-number 
+           (check-message-number (response ldap) (mesg ldap))))
+      (cond
+        ((null response-minus-message-number) (receive-message ldap))
+        (t (setf (response ldap) response-minus-message-number))))))
 
 (defmethod handle-extended-response ((ldap ldap) content)
   "Process an extended response.
@@ -1215,20 +1224,16 @@ the directory server returned."
      with context = nil
      with reply-buffer = nil
      with flags = nil
-     do (format t "init-sec~%")
      do (multiple-value-bind (continue-reply context-result buffer flags-reply)
             (cl-gss:init-sec "ldap@sg-dc3.sg.murex.com"
                              :flags '(:mutual :replay)
                              :context context
                              :input-token reply-buffer)
-          (format t "flags reply: ~s~%" flags-reply)
           (setq need-reply continue-reply)
           (setq context context-result)
           (setq flags flags-reply)
-          (format t "after init sec. need-reply=~s, context=~s buflen=~s~%" need-reply context (if buffer (length buffer) "NIL"))
           (when buffer
             (let ((message (create-sasl-message ldap buffer)))
-              (format t "sending message: len=~s~%" (length message))
               (send-message ldap message))
             (receive-message ldap)
             (let ((res (car (parse-ldap-message ldap))))
