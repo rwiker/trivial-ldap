@@ -952,9 +952,9 @@ return list of lists of attributes."
 		     :type symbol
 		     :documentation "nil, t, or bind"
 		     :accessor reuse-connection)
-   (gss    :initarg :gss
-           :initform nil
-           :accessor gss)
+   (sasl    :initarg :sasl
+            :initform nil
+            :accessor sasl)
    (gss-context :initform nil
                 :accessor gss-context)
    (incoming-buffer :initform nil
@@ -988,11 +988,14 @@ indicates encryption. Other values means plain wrapping.")
 		      :initform nil
 		      :type (boolean)
 		      :accessor results-pending-p)))
-   
+
+(defmethod initialize-instance :after ((ldap ldap) &key &allow-other-keys)
+  (unless (member (sasl ldap) '(nil :gssapi :gss-spnego))
+    (error "The only supported SASL mechanisms :GSSAPI or :GSS-SPNEGO")))
 
 (defun new-ldap (&key (host "localhost") (sslflag nil)
 		 (port (if sslflag +ldap-port-ssl+ +ldap-port-no-ssl+))
-		 (user "") (pass "") (base nil) (debug nil) (gss nil)
+		 (user "") (pass "") (base nil) (debug nil) (sasl nil)
 		 (reuse-connection nil))
   "Instantiate a new ldap object."
   (labels ((find-symbol-in-package-or-error (name package)
@@ -1000,7 +1003,7 @@ indicates encryption. Other values means plain wrapping.")
                (unless s
                  (error "Could not find symbol ~a in ~a" name (package-name package)))
                s)))
-    (when (and gss (null *init-sec-fn*))
+    (when (and sasl (null *init-sec-fn*))
       (let ((package (find-package "CL-GSS")))
         (unless package
           (error "When using GSSAPI authentication, the CL-GSS package needs to be loaded."))
@@ -1009,7 +1012,7 @@ indicates encryption. Other values means plain wrapping.")
         (setq *unwrap-fn* (find-symbol-in-package-or-error "UNWRAP" package))))
     (make-instance 'ldap :host host :port port :user user :sslflag sslflag
                    :pass pass :debugflag debug :base base 
-                   :reuse-connection reuse-connection :gss gss)))
+                   :reuse-connection reuse-connection :sasl sasl)))
 
 (defmethod debug-mesg ((ldap ldap)  message)
   "If debugging in T, print a message."
@@ -1222,18 +1225,25 @@ the directory server returned."
 			ld->ld_version, dn, LDAP_AUTH_SASL,
 			mechanism, cred );
 |#
-(defun create-sasl-message (ldap buffer)
+
+(defun mechanism-string (name)
+  (ecase name
+    (:gssapi "GSSAPI")
+    (:gss-spnego "GSS-SPNEGO")))
+
+(defun create-sasl-message (ldap mechanism buffer)
   (ber-msg +ber-bind-tag+ (append (seq-integer +ldap-version+)
                                   (seq-octet-string (user ldap))
                                   (ber-msg '(#xa3);(ber-tag 'context 'primitive 35)
-                                           (append (seq-octet-string "GSS-SPNEGO")
+                                           (append (seq-octet-string (mechanism-string mechanism))
                                                    (ber-tag 'universal 'primitive #x04)
                                                    (ber-length (length buffer))
                                                    (coerce buffer 'list)
                                                    (seq-null)))
                                   (seq-null))))
 
-(defun bind-gss (ldap)
+(defun bind-gss (ldap mechanism)
+  (check-type mechanism (member :gssapi :gss-spnego))
   (loop
      with need-reply
      with context = nil
@@ -1249,26 +1259,29 @@ the directory server returned."
           (setq context context-result)
           (setq flags flags-reply)
           (when buffer
-            (let ((message (create-sasl-message ldap buffer)))
+            (let ((message (create-sasl-message ldap mechanism buffer)))
               (send-message ldap message))
             (receive-message ldap)
             (let ((res (car (parse-ldap-message ldap))))
-              (unless (and (eql (first res) 0)
-                           (null (second res))
-                           (null (third res)))
+              ;; What is the third element of the result? Usually, it's NIL
+              ;; but sometimes it contains a byte array
+              (unless (and (or (eql (first res) 0)
+                               (eql (first res) 14))
+                           (null (second res)))
                 (error "Unexpected SASL response"))
               (setq reply-buffer (coerce (fourth res) 'simple-vector)))))
      while need-reply
      finally (progn
                (setf (gss-context ldap) context)
-               (when (or (member :integ flags)
-                         (member :conf flags))
+               (when (and (eq mechanism :gss-spnego)
+                          (or (member :integ flags)
+                              (member :conf flags)))
                  (setf (wrap-packets ldap) (if (member :conf flags) :conf :integ))))))
 
 (defmethod bind ((ldap ldap))
   "Send a BindRequest."
-  (if (gss ldap)
-      (bind-gss ldap)
+  (if (sasl ldap)
+      (bind-gss ldap (sasl ldap))
       (process-message ldap (msg-bind ldap))))
 
 (defmethod unbind ((ldap ldap))
@@ -1519,12 +1532,6 @@ LIST-OF-MODS is a list of (type att val) triples."
 		 (push (read-generic 
 			(subseq message start-of-data end-of-data)) res)
 		 (setf message (subseq message end-of-data)))))
-            #+nil((= tag-byte +ber-tag-sasl-res-creds+)
-             (multiple-value-bind (val bytes)
-                 (read-octets (subseq message 1))
-               (push val res)
-               (format t "response: ~s~%" val)
-               (setf message (subseq message (1+ bytes)))))
 	    (t (error 'ldap-error :mesg (format nil "Unreadable tag value encountered: ~s" tag-byte))))
 	  (read-generic message res)))
       (nreverse res)))
