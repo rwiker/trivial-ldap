@@ -1226,24 +1226,23 @@ the directory server returned."
 			mechanism, cred );
 |#
 
-(defun mechanism-string (name)
-  (ecase name
-    (:gssapi "GSSAPI")
-    (:gss-spnego "GSS-SPNEGO")))
-
 (defun create-sasl-message (ldap mechanism buffer)
   (ber-msg +ber-bind-tag+ (append (seq-integer +ldap-version+)
                                   (seq-octet-string (user ldap))
                                   (ber-msg '(#xa3);(ber-tag 'context 'primitive 35)
-                                           (append (seq-octet-string (mechanism-string mechanism))
+                                           (append (seq-octet-string mechanism)
                                                    (ber-tag 'universal 'primitive #x04)
                                                    (ber-length (length buffer))
                                                    (coerce buffer 'list)
                                                    (seq-null)))
                                   (seq-null))))
 
-(defun bind-gss (ldap mechanism)
-  (check-type mechanism (member :gssapi :gss-spnego))
+(defun send-sasl (ldap mechanism buffer)
+  (send-message ldap (create-sasl-message ldap mechanism buffer))
+  (receive-message ldap)
+  (car (parse-ldap-message ldap)))
+
+(defun bind-gss-spnego (ldap)
   (loop
      with need-reply
      with context = nil
@@ -1252,37 +1251,69 @@ the directory server returned."
      do (multiple-value-bind (continue-reply context-result buffer flags-reply)
             (funcall *init-sec-fn*
                      (format nil "ldap@~a" (host ldap))
-                     :flags '(:mutual :replay)
+                     :flags '(:mutual :replay :integ)
                      :context context
                      :input-token reply-buffer)
           (setq need-reply continue-reply)
           (setq context context-result)
           (setq flags flags-reply)
           (when buffer
-            (let ((message (create-sasl-message ldap mechanism buffer)))
-              (send-message ldap message))
-            (receive-message ldap)
-            (let ((res (car (parse-ldap-message ldap))))
-              ;; What is the third element of the result? Usually, it's NIL
-              ;; but sometimes it contains a byte array
-              (unless (and (or (eql (first res) 0)
-                               (eql (first res) 14))
-                           (null (second res)))
+            (let ((res (send-sasl ldap "GSS-SPNEGO" buffer)))
+              (unless (eql (first res) 0)
                 (error "Unexpected SASL response"))
               (setq reply-buffer (coerce (fourth res) 'simple-vector)))))
      while need-reply
      finally (progn
                (setf (gss-context ldap) context)
-               (when (and (eq mechanism :gss-spnego)
-                          (or (member :integ flags)
-                              (member :conf flags)))
+               (when (or (member :integ flags)
+                         (member :conf flags))
                  (setf (wrap-packets ldap) (if (member :conf flags) :conf :integ))))))
+
+(defun bind-gss (ldap)
+  (loop
+     with need-reply
+     with context = nil
+     with reply-buffer = nil
+     with flags = nil
+     with res = nil
+     do (multiple-value-bind (continue-reply context-result buffer flags-reply)
+            (funcall *init-sec-fn*
+                     (format nil "ldap@~a" (host ldap))
+                     :flags '(:mutual :replay :integ)
+                     :context context
+                     :input-token reply-buffer)
+          (setq need-reply continue-reply)
+          (setq context context-result)
+          (setq flags flags-reply)
+          (cond ((not (null buffer))
+                 (setq res (send-sasl ldap "GSSAPI" buffer))
+                 (when need-reply
+                   (unless (eql (first res) 14)
+                     (error "Unexpected SASL response"))
+                   (setq reply-buffer (coerce (fourth res) 'simple-vector))))
+                ((not need-reply)
+                 (setq res (send-sasl ldap "GSSAPI" #())))))
+     while need-reply
+     finally (progn
+               (setf (gss-context ldap) context)
+               (let ((sasl-res (funcall *unwrap-fn* context (fourth res))))
+                 (unless (= (length sasl-res) 4)
+                   (error "Unexpected result from SASL handshake"))
+                 (send-message ldap (create-sasl-message ldap "GSSAPI"
+                                                         (funcall *wrap-fn* context #(0 0 0 0)
+                                                                  :conf nil)))))))
 
 (defmethod bind ((ldap ldap))
   "Send a BindRequest."
-  (if (sasl ldap)
-      (bind-gss ldap (sasl ldap))
-      (process-message ldap (msg-bind ldap))))
+  (let ((mechanism (sasl ldap)))
+    (cond ((eq mechanism :gssapi)
+           (bind-gss ldap))
+          ((eq mechanism :gss-spnego)
+           (bind-gss-spnego ldap))
+          ((null mechanism)
+           (process-message ldap (msg-bind ldap)))
+          (t
+           (error "Unknown SASL type: ~s" mechanism)))))
 
 (defmethod unbind ((ldap ldap))
   "Unbind and close the ldap stream."
