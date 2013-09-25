@@ -914,12 +914,12 @@ return list of lists of attributes."
 ;;;; LDAP class & methods
 ;;;;
 
-(defclass ldap () 
-  ((host   :initarg :host 
+(defclass ldap ()
+  ((host   :initarg :host
 	   :initform "localhost"
-	   :type string 
+	   :type string
 	   :accessor host)
-   (port   :initarg :port 
+   (port   :initarg :port
 	   :initform +ldap-port-no-ssl+
 	   :type integer 
 	   :accessor port)
@@ -937,10 +937,10 @@ return list of lists of attributes."
 	   :accessor pass)
    (ldapstream :initarg :ldapstream  
 	   :initform nil 
-	   :type (or null stream) 
+	   :type (or null stream)
 	   :accessor ldapstream)
    (ldapsock :initarg :ldapsock
-	   :initform nil 
+	   :initform nil
 	   :accessor ldapsock)
    (reuse-connection :initarg :reuse-connection
 		     :initform t
@@ -1266,6 +1266,24 @@ the directory server returned."
   (receive-message ldap)
   (car (parse-ldap-message ldap)))
 
+(defun send-sasl-auth-res (ldap context sasl-res)
+  (let ((mask (aref sasl-res 0)))
+    (destructuring-bind (wrap-packets res)
+        (cond #+nil((not (zerop (logand #x04 mask)))
+               (list :conf 4))
+              #+nil((not (zerop (logand #x02 mask)))
+               (list :integ 2))
+              ((not (zerop (logand #x01 mask)))
+               (list nil 1))
+              (t
+               (error "Unknown SASL support values: ~s" mask)))
+      (let ((wrapped (funcall *wrap-fn* context
+                              (make-array 4
+                                          :element-type '(unsigned-byte 8)
+                                          :initial-contents (list res 1 0 0)))))
+        (send-message ldap (create-sasl-message ldap "GSSAPI" wrapped))
+        (setf (wrap-packets ldap) wrap-packets)))))
+
 (defun bind-gss-spnego (ldap)
   (loop
      with need-reply
@@ -1323,9 +1341,7 @@ the directory server returned."
                (let ((sasl-res (funcall *unwrap-fn* context (fourth res))))
                  (unless (= (length sasl-res) 4)
                    (error "Unexpected result from SASL handshake"))
-                 (send-message ldap (create-sasl-message ldap "GSSAPI"
-                                                         (funcall *wrap-fn* context #(0 0 0 0)
-                                                                  :conf nil)))))))
+                 (send-sasl-auth-res ldap context sasl-res)))))
 
 (defmethod bind ((ldap ldap))
   "Send a BindRequest."
