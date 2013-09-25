@@ -61,6 +61,12 @@ and
 
     (setf (ldap:attribute-binary-p <attribute-name>) <generalized-boolean>)
 
+Note: Elias Mårtenson has supplied some handy restarts that can be
+used when it turns out that an attribute cannot be converted to UTF-8
+(which, in turn, probably means that it should be treated as
+binary). See handle-as-binary and handle-as-binary-and-add-known in
+trivial-ldap.lisp .
+
 
 List Equivalents
 ----------------
@@ -79,8 +85,38 @@ strings. This has two advantages:
   when a symbol is specified, the actual value used is whatever
   `(symbol-name <symbol>)` returns.
 
+* The function #'listify-filter can be used to turn a string filter
+  into an equivalent list representation; this should be useful for
+  experimenting with the list format.
+
 ### Examples:
 
     (ldap:search *ldap* '(and (= objectclass person) (= cname "rayw")))
 
+    (let ((name "rayw"))
+        (ldap:search *ldap* `(and (= objectclass person) (= cname ,name))))
+
+Paging Through Results
+----------------------
+
+Support for the LDAP Control Extension "Simple Paged Results"
+(rfc2696) has been added. It is invoked by setting the :size-limit
+search parameter to 0 (zero), and setting :paging-size to a positive
+integer. Note that the server imposes its own restrictions here, so
+the actual number of results in a batch may be lower than specified.
+
+Apart from setting these two required parameters, the operation of the
+paging mechanism is wholly transparent: batches are fetched
+automatically whenever the #'next-search-result method has exhausted
+all entries in the current batch (assuming that the appropriate
+parameters have been specified, and that there are actually more
+results to be fetched.)
+
+### Examples:
+
+    (and (ldap:search *ldap* '(& (substring samaccountname "ra*") (= objectclass person))
+                      :attributes '("1.1") :size-limit 0 :paging-size 500)
+         (loop for entry = (ldap:next-search-result *ldap*)
+               while entry
+               count entry))
 

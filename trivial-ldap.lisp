@@ -1,48 +1,24 @@
-;;;; TRIVIAL-LDAP v0.92 -- a one file, all lisp client implementation of
+;;;; TRIVIAL-LDAP -- a one file, all lisp client implementation of
 ;;;; parts of RFC 2261.  
 
 ;;;; Please see the trivial-ldap.html file for documentation and limitations.
 
-;;;; Updates are available at:
-;;;;    http://homepage.mac.com/ignavusinfo/trivial-ldap/
-
-;;;; TRIVIAL-LDAP is Copyright 2005-2009 Kevin Montuori and is 
-;;;; distributed under The Clarified Artistic License, a copy of which
-;;;; should have accompanied this file.
+;;;; TRIVIAL-LDAP is
+;;;; Copyright 2005-2009 Kevin Montuori
+;;;; and is distributed under The Clarified Artistic License, a copy
+;;;; of which should have accompanied this file.
 
 ;;;; Kevin Montuori <montuori@gmail.com>
 
 #+xcvb (module ())
 
-(defpackage :trivial-ldap
-    (:use :cl-user :common-lisp :usocket)
-  (:nicknames :ldap)
-  (:shadow :delete :search)
-  (:export
-   ; mod types.
-   delete replace add 
-   ; search option symbols
-   base sub one never search find always
-   ; objects.
-   entry ldap
-   ; methods.
-   #:user #:pass #:base #:debugflag #:host #:port #:rdn #:dn #:attrs #:compare
-   #:sslflag #:reuse-connection #:rebind
-   #:bind #:unbind #:abandon #:add #:delete #:moddn #:search 
-   #:new-entry-from-list #:replace-attr #:del-attr #:add-attr #:modify
-   #:attr-list #:attr-value #:new-entry #:new-ldap #:ldif #:change-rdn
-   #:response #:results-pending-p #:next-search-result
-   ; convenience macros
-   #:dosearch #:ldif-search
-   ; utilities
-   #:escape-string #:unescape-string
-   #:attribute-binary-p
-   #:probably-binary-field-error
-   #:skip-entry
-   #:handle-as-binary
-   #:handle-as-binary-and-add-known))
-
 (in-package :trivial-ldap)
+
+(declaim (optimize (speed 3) (safety 1) (debug 1) (compilation-speed 0)))
+
+(defparameter *init-sec-fn* nil)
+(defparameter *wrap-fn* nil)
+(defparameter *unwrap-fn* nil)
 
 (defparameter *binary-attributes*
   (list :objectsid :objectguid))
@@ -106,6 +82,15 @@
     (:report (lambda (c stream)
 	       (format stream "~A~%DN: ~A~%Code: ~A~%Message: ~A~%"
 		       (mesg c) (dn c) (code c) (msg c)))))
+
+(define-condition ldap-bind-error (ldap-error)
+  ((code-sym :initarg :code-sym
+             :reader code-sym
+             :initform (error "Must specify code-sym")))
+  (:report (lambda (c stream)
+             (format stream "LDAP Bind Error: ~A~%"
+                     (code-sym c)))))
+             
 
 ;;;;
 ;;;; utility functions
@@ -325,6 +310,9 @@ NUMBER should be either an integer or LDAP application name as symbol."
 
 (define-constant +ldap-disconnection-response+ "1.3.6.1.4.1.1466.20036"
   "OID of the unsolicited disconnection reponse.")
+
+(define-constant +ldap-control-extension-paging+ "1.2.840.113556.1.4.319"
+  "OID of the paging control.")
   
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (define-constant +ldap-application-names+
@@ -483,8 +471,12 @@ NUMBER should be either an integer or LDAP application name as symbol."
   (ber-tag 'application 'primitive 'unbindrequest))
 (define-constant +ber-modify-tag+
   (ber-tag 'application 'constructed 'modifyrequest))
+(define-constant +ber-controls-tag+
+    (car (ber-tag 'context 'constructed 0)))                 
 
 ;;;; readers.
+(define-constant +ber-tag-controls+
+    (car (ber-tag 'context 'constructed 0)))                 
 (define-constant +ber-tag-referral+
     (car (ber-tag 'context 'constructed 'searchrequest)))
 (define-constant +ber-tag-extendedresponse+
@@ -505,6 +497,8 @@ NUMBER should be either an integer or LDAP application name as symbol."
     (car (ber-tag 'universal 'constructed #x10)))
 (define-constant +ber-tag-set+ 
     (car (ber-tag 'universal 'constructed #x11)))
+(define-constant +ber-tag-sasl-res-creds+
+    #x87)
 
 (defun seq-null ()
   "BER encode a NULL"
@@ -667,9 +661,9 @@ NUMBER should be either an integer or LDAP application name as symbol."
    item)
 
   (filtercomp
-   (and filterlist (lambda (op list) (declare (ignore op)) (cons '& list)))
-   (or filterlist (lambda (op list) (declare (ignore op)) (cons '\| list)))
-   (not filter (lambda (op element) (declare (ignore op)) (list '! element)))
+   (and filterlist (lambda (op list) (declare (ignore op)) (cons (intern "&") list)))
+   (or filterlist (lambda (op list) (declare (ignore op)) (cons (intern "|") list)))
+   (not filter (lambda (op element) (declare (ignore op)) (list (intern "!") element)))
    item)
 
   (filterlist
@@ -685,9 +679,9 @@ NUMBER should be either an integer or LDAP application name as symbol."
          (lambda (attr type value)
            (if (eq type '=)
                (cond ((string= value "*")
-                      (list '=* attr))
+                      (list (intern "=*") attr))
                      ((position #\* value :test #'char=)
-                      (list 'substring attr value))
+                      (list (intern "SUBSTRING") attr value))
                      (t                      
                       (list type attr value)))
              (list type attr value)))))
@@ -698,17 +692,24 @@ NUMBER should be either an integer or LDAP application name as symbol."
   (value
    string))
 
+(defun listify-filter (filter)
+  (let ((parsed-filter (yacc:parse-with-lexer (ldap-filter-lexer filter) *ldap-filter-parser*)))
+    parsed-filter))
+
 (defun seq-filter (filter)
   (let* ((filter (etypecase filter
 		   (cons   filter)
-		   (symbol filter)
-		   (string (yacc:parse-with-lexer (ldap-filter-lexer filter) *ldap-filter-parser*))))
-	 (op (intern (symbol-name (car filter)) :trivial-ldap)))
+		   #+nil ; FIXME: can't see that symbol can appear
+                         ; here... and if it does, we cannot take the
+                         ; #'car of it
+                   (symbol filter)
+		   (string (listify-filter filter))))
+         (op (intern (symbol-name (car filter)) :trivial-ldap)))
     (when (eq op 'or)
       (setq op '\|))
     (when (eq op 'and)
       (setq op '&))
-    (when (eq op '!)
+    (when (eq op 'not)
       (setq op '!))
     (when (eq op 'wildcard)
       (setq op 'substring))
@@ -913,12 +914,12 @@ return list of lists of attributes."
 ;;;; LDAP class & methods
 ;;;;
 
-(defclass ldap () 
-  ((host   :initarg :host 
+(defclass ldap ()
+  ((host   :initarg :host
 	   :initform "localhost"
-	   :type string 
+	   :type string
 	   :accessor host)
-   (port   :initarg :port 
+   (port   :initarg :port
 	   :initform +ldap-port-no-ssl+
 	   :type integer 
 	   :accessor port)
@@ -936,16 +937,29 @@ return list of lists of attributes."
 	   :accessor pass)
    (ldapstream :initarg :ldapstream  
 	   :initform nil 
-	   :type (or null stream) 
+	   :type (or null stream)
 	   :accessor ldapstream)
    (ldapsock :initarg :ldapsock
-	   :initform nil 
+	   :initform nil
 	   :accessor ldapsock)
    (reuse-connection :initarg :reuse-connection
 		     :initform t
 		     :type symbol
 		     :documentation "nil, t, or bind"
 		     :accessor reuse-connection)
+   (sasl    :initarg :sasl
+            :initform nil
+            :accessor sasl)
+   (gss-context :initform nil
+                :accessor gss-context)
+   (incoming-buffer :initform nil
+                    :accessor incoming-buffer)
+   (incoming-buffer-pos :initform nil
+                        :accessor incoming-buffer-pos)
+   (wrap-packets :initform nil
+                 :accessor wrap-packets
+                 :documentation "NIL means no wrapping. :CONF
+indicates encryption. Other values means plain wrapping.")
    (mesg   :initarg :mesg 
 	   :initform 0 
 	   :type integer 
@@ -968,17 +982,37 @@ return list of lists of attributes."
    (results-pending-p :initarg :results-pending-p
 		      :initform nil
 		      :type (boolean)
-		      :accessor results-pending-p)))
-   
+		      :accessor results-pending-p)
+   (paging-cookie :initform ""
+                  :type string
+                  :accessor paging-cookie)
+   (search-fn :initform nil
+              :accessor search-fn)))
+
+(defmethod initialize-instance :after ((ldap ldap) &key &allow-other-keys)
+  (unless (member (sasl ldap) '(nil :gssapi :gss-spnego))
+    (error "The only supported SASL mechanisms :GSSAPI or :GSS-SPNEGO")))
 
 (defun new-ldap (&key (host "localhost") (sslflag nil)
 		 (port (if sslflag +ldap-port-ssl+ +ldap-port-no-ssl+))
-		 (user "") (pass "") (base nil) (debug nil)
+		 (user "") (pass "") (base nil) (debug nil) (sasl nil)
 		 (reuse-connection nil))
   "Instantiate a new ldap object."
-  (make-instance 'ldap :host host :port port :user user :sslflag sslflag
-		 :pass pass :debugflag debug :base base 
-		 :reuse-connection reuse-connection))
+  (labels ((find-symbol-in-package-or-error (name package)
+             (let ((s (find-symbol name package)))
+               (unless s
+                 (error "Could not find symbol ~a in ~a" name (package-name package)))
+               s)))
+    (when (and sasl (null *init-sec-fn*))
+      (let ((package (find-package "CL-GSS")))
+        (unless package
+          (error "When using GSSAPI authentication, the CL-GSS package needs to be loaded."))
+        (setq *init-sec-fn* (find-symbol-in-package-or-error "INIT-SEC" package))
+        (setq *wrap-fn* (find-symbol-in-package-or-error "WRAP" package))
+        (setq *unwrap-fn* (find-symbol-in-package-or-error "UNWRAP" package))))
+    (make-instance 'ldap :host host :port port :user user :sslflag sslflag
+                   :pass pass :debugflag debug :base base 
+                   :reuse-connection reuse-connection :sasl sasl)))
 
 (defmethod debug-mesg ((ldap ldap)  message)
   "If debugging in T, print a message."
@@ -1029,56 +1063,110 @@ settings on their LDAP servers."
     (when (and (not absolutely-no-bind)
 	       (eq (reuse-connection ldap) 'rebind))
       (debug-mesg ldap "rebinding...")
-      (bind ldap))
+      (multiple-value-bind (rc code-sym msg)
+          (bind ldap)
+        (declare (ignore msg))
+        (unless rc
+          (error 'ldap-bind-error :code-sym code-sym))))
     stream))
-  
+
+(defun encrypt-message (ldap message stream)
+  (let ((buffer (make-array (length message) :element-type '(unsigned-byte 8) :initial-contents message)))
+    (write-with-length (funcall *wrap-fn*
+                                (gss-context ldap) buffer
+                                :conf (if (eq (wrap-packets ldap) :conf) t nil))
+                       stream)))
+
 (defmethod send-message ((ldap ldap) message &optional (response-expected t))
   "Send a BER encoded message to ldap."
   (let ((mesg (seq-sequence (append (seq-integer (mesg-incf ldap)) message)))
 	(stream (get-stream ldap)))
     (debug-mesg ldap (format nil *hex-print* "To LDAP: " mesg))
-    (dolist (byte mesg) (write-byte byte stream))
+    (if (wrap-packets ldap)
+        (encrypt-message ldap mesg stream)
+        (dolist (byte mesg) (write-byte byte stream)))
     (handler-case (finish-output stream)
       (error (e) (error 'ldap-connection-error
 			:host (host ldap) :port (port ldap) :mesg e)))
     (when response-expected (setf (results-pending-p ldap) t))))
 
-(defmethod receive-length ((ldap ldap))
+(defun decrypt-stream (ldap)
+  (multiple-value-bind (buffer conf)
+      (funcall *unwrap-fn* (gss-context ldap) (read-with-length (ldapstream ldap)))
+    (when (and (eq (wrap-packets ldap) :conf)
+               (not conf))
+      (error "Received unencrypted packets on a stream an encrypted connection. Aborting."))
+    buffer))
+
+(defun read-wrapped-byte (ldap)
+  (if (wrap-packets ldap)
+      (progn
+        (when (or (null (incoming-buffer ldap))
+                  (>= (incoming-buffer-pos ldap) (length (incoming-buffer ldap))))
+          (setf (incoming-buffer ldap) (decrypt-stream ldap))
+          (setf (incoming-buffer-pos ldap) 0))
+        (let ((position (incoming-buffer-pos ldap)))
+          (incf (incoming-buffer-pos ldap))
+          (aref (incoming-buffer ldap) position)))
+      (read-byte (ldapstream ldap))))
+
+(defun receive-length (ldap)
   "Read length of LDAP message from stream, return length & the bytes read."
-  (let* ((stream (ldapstream ldap))
-	 (length-byte (read-byte stream))
+  (let* ((length-byte (read-wrapped-byte ldap))
 	 (byte-seq ())
 	 (byte-len (- length-byte 128))
 	 (length-of-message
 	  (cond
 	    ((< length-byte 128) length-byte)
-	    (t (dotimes (i byte-len) (push (read-byte stream) byte-seq))
+	    (t (dotimes (i byte-len) (push (read-wrapped-byte ldap) byte-seq))
 	       (base256->base10 (reverse byte-seq)))))
 	 (all-bytes-consumed (append (list length-byte) (nreverse byte-seq))))
     (values length-of-message all-bytes-consumed)))
+
+(defun read-with-length (stream &key (length 4))
+  (let* ((buf (make-array length :element-type '(unsigned-byte 8))))
+    (unless (= (read-sequence buf stream) length)
+      (error "Stream truncated when reading length"))
+    (let ((buf-length (loop
+                         with result = 0
+                         for i from 0 below length
+                         do (setq result (logior result (ash (aref buf i) (* (- length i 1) 8))))
+                         finally (return result))))
+      (let ((result-seq (make-array buf-length :element-type '(unsigned-byte 8))))
+        (unless (= (read-sequence result-seq stream) buf-length)
+          (error "Stream truncated when reading buffer"))
+        result-seq))))
+
+(defun write-with-length (buffer stream &key (length 4))
+  (let ((length-buffer (make-array length :element-type '(unsigned-byte 8))))
+    (loop
+       for i from 0 below length
+       do (setf (aref length-buffer i) (logand #xFF (ash (length buffer) (- (* (- length i 1) 8))))))
+    (write-sequence length-buffer stream)
+    (write-sequence buffer stream)
+    (finish-output stream)))
 
 (defmethod receive-message ((ldap ldap))
   "Read incoming LDAP data from the stream, populate LDAP response slot.
 The initial tag and length of message bytes will have been consumed already
 and will not appear in the response.  Note that this method is executed
 only for its side effects."
-  (let* (ber-response 
-	 (stream (get-stream ldap))
-	 (initial-byte (read-byte stream)))
+  (let* (ber-response
+         (initial-byte (read-wrapped-byte ldap)))
     (unless (or (null initial-byte) (valid-ldap-response-p initial-byte))
       (error "Received unparsable data from LDAP server."))
     (multiple-value-bind (message-length bytes-read) (receive-length ldap)
-      (dotimes (i message-length) (push (read-byte stream) ber-response))
+      (dotimes (i message-length) (push (read-wrapped-byte ldap) ber-response))
       (setf (response ldap) (nreverse ber-response))
       (debug-mesg ldap (format nil *hex-print* "From LDAP:"
-			       (append (list initial-byte) bytes-read 
-				       (response ldap)))))
+                               (append (list initial-byte) bytes-read 
+                                       (response ldap)))))
     (let ((response-minus-message-number 
-	   (check-message-number (response ldap) (mesg ldap))))
+           (check-message-number (response ldap) (mesg ldap))))
       (cond
-	((null response-minus-message-number) (receive-message ldap))
-	(t (setf (response ldap) response-minus-message-number))))))
-  
+        ((null response-minus-message-number) (receive-message ldap))
+        (t (setf (response ldap) response-minus-message-number))))))
+
 (defmethod handle-extended-response ((ldap ldap) content)
   "Process an extended response.
 Currently this means closing the connection if it is a disconnect request
@@ -1088,6 +1176,20 @@ and throw an error if it's anything else."
       (error 'ldap-error 
 	     :mesg (format nil "Received unhandled extended response: ~A~%"
 			   content))))
+
+(defun process-response-controls (ldap controls)
+  (loop for (control-extension-oid/octets control-value) in controls
+        for control-extension-oid = (char-code-list->string control-extension-oid/octets)
+        do (cond ((string= control-extension-oid +ldap-control-extension-paging+)
+                  (destructuring-bind (remaining-estimate cookie)
+                      (first (read-generic control-value))
+                    (declare (ignore remaining-estimate))
+                    #+nil
+                    (format t "~&Control: ~a; remaining (estimate): ~d; length(cookie) = ~d~%"
+                            control-extension-oid remaining-estimate (length cookie))
+                    (setf (paging-cookie ldap) cookie)))
+                 (t
+                  (error "Unknown control extension: ~a" control-extension-oid)))))
 
 (defmethod parse-ldap-message ((ldap ldap) &optional (return-entry nil))
   "Parse an ldap object's response slot."
@@ -1103,7 +1205,13 @@ and throw an error if it's anything else."
 	     (t (setf received-content new-entry)))))
 	((eq appname 'searchresultreference))
 	((eq appname 'searchresultdone)
-	 (setf (results-pending-p ldap) nil)
+         (destructuring-bind (result-code matched-dn error-message . rest)
+             content
+           (declare (ignore result-code matched-dn error-message))
+           (when (and rest (consp rest) (consp (car rest)) (eq (car (car rest)) 'controls))
+             (let ((controls (second (first rest))))
+               (process-response-controls ldap controls))))
+         (setf (results-pending-p ldap) nil)
 	 (setf received-content nil))
 	((eq appname 'extendedresponse) 
 	 (handle-extended-response ldap content)
@@ -1133,9 +1241,119 @@ the directory server returned."
 ;;;; ldap user-level commands.
 ;;;;
 
+;;; sasl.c:122
+;;; Data is sent using the following:
+#|
+		rc = ber_printf( ber, "{it{ist{sON}N}" /*}*/,
+			id, LDAP_REQ_BIND,
+			ld->ld_version, dn, LDAP_AUTH_SASL,
+			mechanism, cred );
+|#
+
+(defun create-sasl-message (ldap mechanism buffer)
+  (ber-msg +ber-bind-tag+ (append (seq-integer +ldap-version+)
+                                  (seq-octet-string (user ldap))
+                                  (ber-msg '(#xa3);(ber-tag 'context 'primitive 35)
+                                           (append (seq-octet-string mechanism)
+                                                   (ber-tag 'universal 'primitive #x04)
+                                                   (ber-length (length buffer))
+                                                   (coerce buffer 'list)
+                                                   (seq-null)))
+                                  (seq-null))))
+
+(defun send-sasl (ldap mechanism buffer)
+  (send-message ldap (create-sasl-message ldap mechanism buffer))
+  (receive-message ldap)
+  (car (parse-ldap-message ldap)))
+
+(defun send-sasl-auth-res (ldap context sasl-res)
+  (let ((mask (aref sasl-res 0)))
+    (destructuring-bind (wrap-packets res)
+        (cond #+nil((not (zerop (logand #x04 mask)))
+               (list :conf 4))
+              #+nil((not (zerop (logand #x02 mask)))
+               (list :integ 2))
+              ((not (zerop (logand #x01 mask)))
+               (list nil 1))
+              (t
+               (error "Unknown SASL support values: ~s" mask)))
+      (let ((wrapped (funcall *wrap-fn* context
+                              (make-array 4
+                                          :element-type '(unsigned-byte 8)
+                                          :initial-contents (list res 1 0 0)))))
+        (send-message ldap (create-sasl-message ldap "GSSAPI" wrapped))
+        (setf (wrap-packets ldap) wrap-packets)))))
+
+(defun bind-gss-spnego (ldap)
+  (loop
+     with need-reply
+     with context = nil
+     with reply-buffer = nil
+     with flags = nil
+     do (multiple-value-bind (continue-reply context-result buffer flags-reply)
+            (funcall *init-sec-fn*
+                     (format nil "ldap@~a" (host ldap))
+                     :flags '(:mutual :replay :integ)
+                     :context context
+                     :input-token reply-buffer)
+          (setq need-reply continue-reply)
+          (setq context context-result)
+          (setq flags flags-reply)
+          (when buffer
+            (let ((res (send-sasl ldap "GSS-SPNEGO" buffer)))
+              (unless (eql (first res) 0)
+                (error "Unexpected SASL response"))
+              (setq reply-buffer (coerce (fourth res) 'simple-vector)))))
+     while need-reply
+     finally (progn
+               (setf (gss-context ldap) context)
+               (when (or (member :integ flags)
+                         (member :conf flags))
+                 (setf (wrap-packets ldap) (if (member :conf flags) :conf :integ))))))
+
+(defun bind-gss (ldap)
+  (loop
+     with need-reply
+     with context = nil
+     with reply-buffer = nil
+     with flags = nil
+     with res = nil
+     do (multiple-value-bind (continue-reply context-result buffer flags-reply)
+            (funcall *init-sec-fn*
+                     (format nil "ldap@~a" (host ldap))
+                     :flags '(:mutual :replay :integ)
+                     :context context
+                     :input-token reply-buffer)
+          (setq need-reply continue-reply)
+          (setq context context-result)
+          (setq flags flags-reply)
+          (cond ((not (null buffer))
+                 (setq res (send-sasl ldap "GSSAPI" buffer))
+                 (when need-reply
+                   (unless (eql (first res) 14)
+                     (error "Unexpected SASL response"))
+                   (setq reply-buffer (coerce (fourth res) 'simple-vector))))
+                ((not need-reply)
+                 (setq res (send-sasl ldap "GSSAPI" #())))))
+     while need-reply
+     finally (progn
+               (setf (gss-context ldap) context)
+               (let ((sasl-res (funcall *unwrap-fn* context (fourth res))))
+                 (unless (= (length sasl-res) 4)
+                   (error "Unexpected result from SASL handshake"))
+                 (send-sasl-auth-res ldap context sasl-res)))))
+
 (defmethod bind ((ldap ldap))
   "Send a BindRequest."
-  (process-message ldap (msg-bind ldap)))
+  (let ((mechanism (sasl ldap)))
+    (cond ((eq mechanism :gssapi)
+           (bind-gss ldap))
+          ((eq mechanism :gss-spnego)
+           (bind-gss-spnego ldap))
+          ((null mechanism)
+           (process-message ldap (msg-bind ldap)))
+          (t
+           (error "Unknown SASL type: ~s" mechanism)))))
 
 (defmethod unbind ((ldap ldap))
   "Unbind and close the ldap stream."
@@ -1236,28 +1454,41 @@ LIST-OF-MODS is a list of (type att val) triples."
 
 (defmethod search ((ldap ldap) filter &key base (scope 'sub) 
 		   (deref 'never) (size-limit 0) (time-limit 0) 
-		   types-only attributes)
+		   types-only attributes (paging-size nil))
   "Search the LDAP directory."
-  (let ((base (if (null base) (base ldap) base))
-	(scope (ldap-scope scope))
-	(deref (ldap-deref deref)))
-    (possibly-reopen-and-rebind ldap)
-    (send-message ldap (msg-search filter base scope deref size-limit 
-				   time-limit types-only attributes))
-    (receive-message ldap)
-    (parse-ldap-message ldap)))
+  (flet ((search-i (ldap filter base scope deref size-limit time-limit types-only attributes paging-cookie)
+           (possibly-reopen-and-rebind ldap)
+           (send-message ldap (msg-search filter base scope deref size-limit 
+                                          time-limit types-only attributes paging-size paging-cookie))
+           (receive-message ldap)
+           (parse-ldap-message ldap)))
+    (let ((base (if (null base) (base ldap) base))
+          (scope (ldap-scope scope))
+          (deref (ldap-deref deref)))
+      (setf (search-fn ldap)
+            (when (and paging-size (zerop size-limit))
+              (lambda (paging-cookie)
+                (search-i ldap filter base scope deref size-limit time-limit
+                          types-only attributes paging-cookie))))
+      (funcall #'search-i ldap filter base scope deref size-limit time-limit types-only attributes ""))))
 
 (defmethod next-search-result ((ldap ldap))
   "Return the next search result (as entry obj) or NIL if none."
-  (if (results-pending-p ldap)
-      (let ((pending-entry (entry-buffer ldap)))
-	(cond 
-	  ((not (null pending-entry))
-	   (setf (entry-buffer ldap) nil)
-	   pending-entry)
-	  (t (receive-message ldap)
-	     (parse-ldap-message ldap t))))
-      nil))
+  (flet ((next-search-result-i ()
+           (if (results-pending-p ldap)
+             (let ((pending-entry (entry-buffer ldap)))
+               (cond 
+                ((not (null pending-entry))
+                 (setf (entry-buffer ldap) nil)
+                 pending-entry)
+                (t (receive-message ldap)
+                   (parse-ldap-message ldap t))))
+             nil)))
+    (or (next-search-result-i)
+        (and (plusp (length (paging-cookie ldap)))
+             (search-fn ldap)
+             (funcall (search-fn ldap) (paging-cookie ldap))
+             (next-search-result-i)))))
 
 (defmacro dosearch ((var search-form) &body body)
   (let ((ldap (gensym))
@@ -1332,7 +1563,7 @@ LIST-OF-MODS is a list of (type att val) triples."
 		 mod-list)))
     (ber-msg +ber-modify-tag+ (append dn (seq-sequence mods)))))
 
-(defun msg-search (filter base scope deref size time types attrs)
+(defun msg-search (filter base scope deref size time types attrs &optional paging-size paging-cookie)
   "Return the sequence of bytes representing a search message."
   (let ((filter (seq-filter filter))
 	(base   (seq-octet-string base))
@@ -1341,9 +1572,21 @@ LIST-OF-MODS is a list of (type att val) triples."
 	(size   (seq-integer size))
 	(time   (seq-integer time))
 	(types  (seq-boolean types))
-	(attrs  (seq-attribute-list attrs)))
+	(attrs  (seq-attribute-list attrs))
+        (controls
+         (when (and paging-size
+                    (zerop size))
+           (seq-constructed-choice 0
+                                   (seq-sequence
+                                    (nconc
+                                     (seq-octet-string +ldap-control-extension-paging+)
+                                     (seq-boolean t)
+                                     (seq-octet-string (seq-sequence
+                                                        (nconc
+                                                         (seq-integer paging-size)
+                                                         (seq-octet-string paging-cookie))))))))))
     (ber-msg +ber-search-tag+ 
-	     (append base scope deref size time types filter attrs))))
+	     (append base scope deref size time types filter attrs controls))))
 
 ;;;;
 ;;;; sequence reader & decoder functions
@@ -1357,6 +1600,14 @@ LIST-OF-MODS is a list of (type att val) triples."
       (setf response (subseq response bytes)))
     (values (read-generic response) appname)))
 
+(defun read-controls (message)
+  (multiple-value-bind (length bytes) 
+      (read-length (subseq message 1))
+    (let* ((start-of-data (+ 1 bytes)) ; tag + bytes
+           (end-of-data   (+ start-of-data length))
+           (controls-seq (read-generic (subseq message start-of-data end-of-data))))
+      (values (list 'controls controls-seq) end-of-data))))
+
 (defun read-generic (message &optional (res ()))
   (if (and (consp message) (> (length message) 0))
       (progn
@@ -1367,6 +1618,8 @@ LIST-OF-MODS is a list of (type att val) triples."
 		     ((= tag-byte +ber-tag-str+)  #'read-octets)
 		     ((= tag-byte +ber-tag-ext-name+) #'read-string)
 		     ((= tag-byte +ber-tag-ext-val+)  #'read-string)
+                     ((= tag-byte +ber-tag-controls+) #'read-controls)
+                     ((= tag-byte +ber-tag-sasl-res-creds+) #'read-octets)
 		     (t nil))))
 	  (cond 
 	    ((functionp fn)                                   ; primitive.
@@ -1384,7 +1637,7 @@ LIST-OF-MODS is a list of (type att val) triples."
 		 (push (read-generic 
 			(subseq message start-of-data end-of-data)) res)
 		 (setf message (subseq message end-of-data)))))
-	    (t (error 'ldap-error :mesg "Unreadable tag value encountered.")))
+	    (t (error 'ldap-error :mesg (format nil "Unreadable tag value encountered: ~s" tag-byte))))
 	  (read-generic message res)))
       (nreverse res)))
 
