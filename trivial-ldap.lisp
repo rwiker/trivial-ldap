@@ -14,7 +14,7 @@
 
 (in-package :trivial-ldap)
 
-(declaim (optimize (speed 3) (safety 1) (debug 1) (compilation-speed 0)))
+(declaim (optimize (speed 0) (safety 3) (debug 3) (compilation-speed 0)))
 
 (defparameter *init-sec-fn* nil)
 (defparameter *wrap-fn* nil)
@@ -1309,7 +1309,8 @@ the directory server returned."
                (setf (gss-context ldap) context)
                (when (or (member :integ flags)
                          (member :conf flags))
-                 (setf (wrap-packets ldap) (if (member :conf flags) :conf :integ))))))
+                 (setf (wrap-packets ldap) (if (member :conf flags) :conf :integ)))))
+  t)
 
 (defun bind-gss (ldap)
   (loop
@@ -1341,7 +1342,8 @@ the directory server returned."
                (let ((sasl-res (funcall *unwrap-fn* context (fourth res))))
                  (unless (= (length sasl-res) 4)
                    (error "Unexpected result from SASL handshake"))
-                 (send-sasl-auth-res ldap context sasl-res)))))
+                 (send-sasl-auth-res ldap context sasl-res))))
+  t)
 
 (defmethod bind ((ldap ldap))
   "Send a BindRequest."
