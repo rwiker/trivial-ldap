@@ -1207,7 +1207,14 @@ and throw an error if it's anything else."
 	((eq appname 'searchresultdone)
          (destructuring-bind (result-code matched-dn error-message . rest)
              content
-           (declare (ignore result-code matched-dn error-message))
+           (declare (ignore matched-dn))
+           (when (and (not (eq (ldap-result-code-symbol result-code) 'success))
+                      error-message)
+             (error 'ldap-error :mesg (format nil "Search error: code=~a, message=~a"
+                                              result-code
+                                              (ldap-result-code-string result-code)
+                                              #+nil
+                                              (char-code-list->string error-message))))
            (when (and rest (consp rest) (consp (car rest)) (eq (car (car rest)) 'controls))
              (let ((controls (second (first rest))))
                (process-response-controls ldap controls))))
