@@ -1171,11 +1171,16 @@ only for its side effects."
   "Process an extended response.
 Currently this means closing the connection if it is a disconnect request
 and throw an error if it's anything else."
-  (if (string= (fourth content) +ldap-disconnection-response+)
-      (close-stream ldap)
+  (destructuring-bind (status whatever message response-name) content
+    (declare (ignore whatever))
+    (if (string= response-name +ldap-disconnection-response+)
+      (progn
+        (ignore-errors
+          (close-stream ldap))
+        (error 'ldap-response-error :code status :msg (char-code-list->string message)))
       (error 'ldap-error 
-	     :mesg (format nil "Received unhandled extended response: ~A~%"
-			   content))))
+             :mesg (format nil "Received unhandled extended response: ~A~%"
+                           content)))))
 
 (defun process-response-controls (ldap controls)
   (loop for (control-extension-oid/octets control-value) in controls
