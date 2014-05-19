@@ -132,7 +132,7 @@
 (defun base256-vec->base10 (vec &key (start 0) (end (length vec)))
   (let ((res 0))
     (loop for i from start below end
-          for j from (- end start 1) by -1
+          for j downfrom (- end start 1)
           do (setf res (dpb (aref vec i) (byte 8 (* 8 j)) res)))
     res))
 
