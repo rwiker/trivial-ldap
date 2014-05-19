@@ -25,4 +25,7 @@
    #:skip-entry
    #:handle-as-binary
    #:handle-as-binary-and-add-known
-   #:listify-filter))
+   #:listify-filter
+   ; errors
+   #:ldap-error #:ldap-filter-error #:ldap-connection-error #:ldap-response-error
+   #:ldap-bind-error #:ldap-referral-error))
