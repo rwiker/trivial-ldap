@@ -927,16 +927,6 @@ return list of lists of attributes."
       (dolist (val (attr-value entry att))
 	(setf results (format nil "~@[~A~]~A: ~A~%" results att val))))))
 
-#||
-(defun new-entry-from-list (list)
-  "Create an entry object from the list return by search."
-  (let ((dn (car list))
-	(attrs (mapcar #'(lambda (x) (cons (intern (string-upcase (car x)) :keyword)
-					   (cadr x)))
-		       (cadr list))))
-    (new-entry dn :attrs attrs)))
-||#
-
 (define-condition probably-binary-field-error (error)
   ((key :initarg :key
         :reader probably-binary-field-error-key
@@ -1119,11 +1109,6 @@ indicates encryption. Other values means plain wrapping.")
     (make-instance 'ldap :host host :port port :user user :sslflag sslflag
                    :pass pass :debugflag debug :base base 
                    :reuse-connection reuse-connection :sasl sasl)))
-
-#+nil
-(defmethod debug-mesg ((ldap ldap)  message)
-  "If debugging in T, print a message."
-  (when (debugflag ldap) (format *debug-io* "~A~%" message)))
 
 (defmacro debug-mesg (ldap message)
   "If debugging in T, print a message."
@@ -1732,37 +1717,6 @@ LIST-OF-MODS is a list of (type att val) triples."
   (let* ((length (read-length message))
          (controls-seq (read-generic (copy-response-vec message :end length))))
     (list 'controls controls-seq)))
-
-#+nil
-(defun read-generic (message &optional (res ()))
-  (if (and message (plusp (bytes-remaining message)))
-    (progn
-      (let* ((tag-byte (pop-byte message))
-             (fn (cond
-                  ((= tag-byte +ber-tag-int+)  #'read-integer)
-                  ((= tag-byte +ber-tag-enum+) #'read-integer)
-                  ((= tag-byte +ber-tag-str+)  #'read-octets)
-                  ((= tag-byte +ber-tag-ext-name+) #'read-string)
-                  ((= tag-byte +ber-tag-ext-val+)  #'read-string)
-                  ((= tag-byte +ber-tag-controls+) #'read-controls)
-                  ((= tag-byte +ber-tag-sasl-res-creds+) #'read-octets)
-                  (t nil))))
-        (cond 
-         ((functionp fn)                                   ; primitive.
-          (push (funcall fn message) res))
-         ((or (= tag-byte +ber-tag-set+)                   ; constructed.
-              (= tag-byte +ber-tag-seq+)
-              (= tag-byte +ber-tag-extendedresponse+)
-              (= tag-byte +ber-tag-referral+))
-          (let ((length (progn
-                          (pop-byte message)
-                          (read-length message))))
-            (push (read-generic (copy-response-vec message :end length))
-                  res)))
-         (t (error 'ldap-error :mesg (format nil "Unreadable tag value encountered: ~s" tag-byte)))))
-      (read-generic message res)))
-  (nreverse res))
-
 
 (defun read-generic (message)
   (loop while (plusp (bytes-remaining message))
