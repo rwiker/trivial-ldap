@@ -1716,6 +1716,7 @@ LIST-OF-MODS is a list of (type att val) triples."
 (defun read-controls (message)
   (let* ((length (read-length message))
          (controls-seq (read-generic (copy-response-vec message :end length))))
+    (discard-bytes message length)
     (list 'controls controls-seq)))
 
 (defun read-generic (message)
