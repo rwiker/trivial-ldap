@@ -225,7 +225,7 @@
 (defun string->char-code-list (string)
   "Convert a string into a list of bytes."
    (let ((string (etypecase string 
- 		  (string #+nil (unescape-string string) string)
+ 		  (string (unescape-string string))
  		  (symbol (symbol-name string)))))
      #-(or allegro ccl sbcl lispworks)
      (map 'list #'char-code string)
