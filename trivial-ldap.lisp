@@ -20,7 +20,7 @@
 (defparameter *wrap-fn* nil)
 (defparameter *unwrap-fn* nil)
 
-(defparameter *binary-attributes*
+(defvar *binary-attributes*
   (list :objectsid :objectguid))
 
 (defun attribute-binary-p (attribute-name)
@@ -96,6 +96,12 @@
   (:report (lambda (c stream)
              (declare (ignore c))
              (format stream "LDAP Error: Referral."))))
+
+(define-condition ldap-size-limit-exceeded-error (ldap-error)
+  ()
+  (:report (lambda (c stream)
+             (declare (ignore c))
+             (format stream "LDAP Error: Size Limit Exceeded."))))
 
 ;;;;
 ;;;; utility functions
@@ -1314,13 +1320,16 @@ and throw an error if it's anything else."
            (declare (ignore matched-dn))
            (when (and (not (eq (ldap-result-code-symbol result-code) 'success))
                       error-message)
-             (if (eq (ldap-result-code-symbol result-code) 'referral)
-               (error 'ldap-referral-error)
-               (error 'ldap-error :mesg (format nil "Search error: code=~a, message=~a"
-                                                result-code
-                                                (ldap-result-code-string result-code)
-                                                #+nil
-                                                (char-code-vec->string error-message)))))
+             (cond ((eq (ldap-result-code-symbol result-code) 'referral)
+                    (error 'ldap-referral-error))
+                   ((eq (ldap-result-code-symbol result-code) 'sizeLimitExceeded)
+                    nil)
+                   (t
+                    (error 'ldap-error :mesg (format nil "Search error: code=~a, message=~a"
+                                                     result-code
+                                                     (ldap-result-code-string result-code)
+                                                     #+nil
+                                                     (char-code-vec->string error-message))))))
            (when (and rest (consp rest) (consp (car rest)) (eq (car (car rest)) 'controls))
              (let ((controls (second (first rest))))
                (process-response-controls ldap controls))))
@@ -1621,7 +1630,7 @@ LIST-OF-MODS is a list of (type att val) triples."
 (defmacro ldif-search (&rest search-parameters)
   (let ((ent (gensym)))
     `(dosearch (,ent (search ,@search-parameters))
-      (format t "~A~%" (ldif ,ent)))))
+       (format t "~A~%" (ldif ,ent)))))
 
 ;;;;
 ;;;; ldap message constructors.

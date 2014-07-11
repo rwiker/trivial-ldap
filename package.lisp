@@ -28,4 +28,5 @@
    #:listify-filter
    ; errors
    #:ldap-error #:ldap-filter-error #:ldap-connection-error #:ldap-response-error
-   #:ldap-bind-error #:ldap-referral-error))
+   #:ldap-bind-error #:ldap-referral-error
+   #:ldap-size-limit-exceeded-error))
