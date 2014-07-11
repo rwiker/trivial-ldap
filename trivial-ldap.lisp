@@ -231,7 +231,7 @@
 (defun string->char-code-list (string)
   "Convert a string into a list of bytes."
    (let ((string (etypecase string 
- 		  (string #+nil (unescape-string string) string)
+ 		  (string string)
  		  (symbol (symbol-name string)))))
      #-(or allegro ccl sbcl lispworks)
      (map 'list #'char-code string)
@@ -1725,6 +1725,7 @@ LIST-OF-MODS is a list of (type att val) triples."
 (defun read-controls (message)
   (let* ((length (read-length message))
          (controls-seq (read-generic (copy-response-vec message :end length))))
+    (discard-bytes message length)
     (list 'controls controls-seq)))
 
 (defun read-generic (message)
