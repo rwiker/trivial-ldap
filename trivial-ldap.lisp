@@ -1123,6 +1123,7 @@ indicates encryption. Other values means plain wrapping.")
 
 (defmethod mesg-incf ((ldap ldap)) (incf (mesg ldap)))
 
+#-lispworks
 (defmethod get-stream ((ldap ldap))
   "Open a usocket to the ldap server and set the ldap object's slot.
 If the port number is 636 or the SSLflag is not null, the stream
@@ -1141,6 +1142,33 @@ will be made with CL+SSL."
 	(setf (ldapstream ldap) stream))))
     (ldapstream ldap))
 
+#+lispworks
+(defmethod get-stream ((ldap ldap))
+  "Open a usocket to the ldap server and set the ldap object's slot.
+If the port number is 636 or the SSLflag is not null, the stream
+will be made with CL+SSL."
+  (let ((connection-timeout 20)
+        (read-timeout 20)
+        (write-timeout 20)
+        (existing-stream (ldapstream ldap)))
+    (unless (and (streamp existing-stream)
+                 (open-stream-p existing-stream))
+      (let* ((ssl-ctx (when (or (sslflag ldap) (= (port ldap) 636))
+                        (comm:make-ssl-ctx :ssl-side :client)))
+             stream)
+        (setf stream (comm:open-tcp-stream (host ldap) (port ldap)
+                                           :element-type '(unsigned-byte 8)
+                                           :timeout connection-timeout
+                                           :read-timeout read-timeout
+                                           :ssl-ctx ssl-ctx
+                                           :write-timeout
+                                           write-timeout
+                                           :errorp t))
+        (debug-mesg ldap "Opening socket and stream.")
+        (setf (ldapstream ldap) stream))))
+  (ldapstream ldap))
+
+#-lispworks
 (defmethod close-stream ((ldap ldap))
   "Close an ldap connection if it is currently open."
   (let ((existing-stream (ldapstream ldap))
@@ -1151,6 +1179,15 @@ will be made with CL+SSL."
 	(setf (ldapsock ldap) nil)
 	(close existing-stream)
 	(usocket:socket-close existing-sock)))))
+
+#+lispworks
+(defmethod close-stream ((ldap ldap))
+  "Close an ldap connection if it is currently open."
+  (let ((existing-stream (ldapstream ldap)))
+    (when (and (streamp existing-stream) (open-stream-p existing-stream))
+      (ignore-errors
+        (setf (ldapstream ldap) nil)
+        (close existing-stream)))))
 
 (defmethod possibly-reopen-and-rebind ((ldap ldap) 
 				       &optional (absolutely-no-bind nil))

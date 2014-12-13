@@ -6,4 +6,4 @@
   :description "TRIVIAL-LDAP is a one file, all Common Lisp client implementation of parts of RFC 2261."
   :components ((:file "package") 
                (:file "trivial-ldap" :depends-on ("package")))
-  :depends-on (#:usocket #:cl+ssl #:yacc))
+  :depends-on (#-lispworks #:usocket #-lispworks #:cl+ssl #:yacc))
