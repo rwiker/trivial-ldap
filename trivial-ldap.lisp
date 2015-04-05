@@ -1733,7 +1733,11 @@ LIST-OF-MODS is a list of (type att val) triples."
 	(size   (seq-integer size))
 	(time   (seq-integer time))
 	(types  (seq-boolean types))
-	(attrs  (seq-attribute-list attrs))
+        (attrs
+          (seq-attribute-list (case attrs
+                                ((nil) '("1.1")) ; No attributes
+                                ((t)   nil)      ; All attributes
+                                (t     attrs)))) ; those requested
         (controls
          (when (and paging-size
                     (zerop size))
