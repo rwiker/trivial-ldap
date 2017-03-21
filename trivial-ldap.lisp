@@ -610,14 +610,16 @@ NUMBER should be either an integer or LDAP application name as symbol."
     (etypecase data
       (null (append tag (list #x00)))
       (string  (if (string= data "") 
-		   (append tag (list #x00))
-		   (append tag (ber-length data) 
-			   (string->char-code-list data))))
+                 (append tag (list #x00))
+                 (let ((bytes (string->char-code-list data)))
+                   (append tag (ber-length bytes)
+                           bytes))))
       (integer (seq-integer data))
       (boolean (seq-boolean data))
       (symbol  (let ((str (symbol-name data)))
-		 (append tag (ber-length str) 
-			 (string->char-code-list str)))))))
+                 (let ((bytes (string->char-code-list str)))
+                   (append tag (ber-length bytes)
+                           bytes)))))))
 
 (defun seq-constructed-choice (int &optional data)
   "BER encode a context-specific, constructed choice."
