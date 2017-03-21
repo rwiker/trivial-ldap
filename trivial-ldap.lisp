@@ -1222,7 +1222,7 @@ settings on their LDAP servers."
     (debug-mesg ldap (format nil *hex-print* "To LDAP: " mesg))
     (if (wrap-packets ldap)
         (encrypt-message ldap mesg stream)
-        (dolist (byte mesg) (write-byte byte stream)))
+        (write-sequence mesg stream))
     (handler-case (finish-output stream)
       (error (e) (error 'ldap-connection-error
 			:host (host ldap) :port (port ldap) :mesg e)))
