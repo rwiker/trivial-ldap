@@ -1052,6 +1052,10 @@ return list of lists of attributes."
 		     :type symbol
 		     :documentation "nil, t, or rebind"
 		     :accessor reuse-connection)
+   (timeout :initarg :timeout
+            :initform NIL
+            :type (or null (integer 0))
+            :accessor timeout)
    (sasl    :initarg :sasl
             :initform nil
             :accessor sasl)
@@ -1099,7 +1103,7 @@ indicates encryption. Other values means plain wrapping.")
 (defun new-ldap (&key (host "localhost") (sslflag nil)
 		      (port (if sslflag +ldap-port-ssl+ +ldap-port-no-ssl+))
 		      (user "") (pass "") (base nil) (debug nil) (sasl nil)
-		      (reuse-connection nil))
+		      (reuse-connection nil) (timeout nil))
   "Instantiate a new ldap object."
   (labels ((find-symbol-in-package-or-error (name package)
              (let ((s (find-symbol name package)))
@@ -1114,8 +1118,8 @@ indicates encryption. Other values means plain wrapping.")
         (setq *wrap-fn* (find-symbol-in-package-or-error "WRAP" package))
         (setq *unwrap-fn* (find-symbol-in-package-or-error "UNWRAP" package))))
     (make-instance 'ldap :host host :port port :user user :sslflag sslflag
-                         :pass pass :debugflag debug :base base
-                         :reuse-connection reuse-connection :sasl sasl)))
+                         :pass pass :debugflag debug :base base :sasl sasl
+                         :reuse-connection reuse-connection :timeout timeout)))
 
 (defmacro debug-mesg (ldap message)
   "If debugging in T, print a message."
@@ -1133,6 +1137,7 @@ will be made with CL+SSL."
     (unless (and (streamp existing-stream)
 		 (open-stream-p existing-stream))
       (let* ((sock (usocket:socket-connect (host ldap) (port ldap)
+                                           :timeout (timeout ldap)
 					   :element-type '(unsigned-byte 8)))
 	     (stream
 	       (if (or (sslflag ldap) (= (port ldap) 636))
@@ -1148,9 +1153,9 @@ will be made with CL+SSL."
   "Open a usocket to the ldap server and set the ldap object's slot.
 If the port number is 636 or the SSLflag is not null, the stream
 will be made with CL+SSL."
-  (let ((connection-timeout 20)
-        (read-timeout 20)
-        (write-timeout 20)
+  (let ((connection-timeout (timeout ldap))
+        (read-timeout (timeout ldap))
+        (write-timeout (timeout ldap))
         (existing-stream (ldapstream ldap)))
     (unless (and (streamp existing-stream)
                  (open-stream-p existing-stream))
